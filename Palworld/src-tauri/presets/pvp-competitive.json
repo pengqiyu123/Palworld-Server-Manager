@@ -1,0 +1,9 @@
+[
+  {"name": "bIsPvP", "value": "True", "description": "启用 PvP 模式"},
+  {"name": "bEnablePlayerToPlayerDamage", "value": "True", "description": "启用玩家间伤害"},
+  {"name": "DeathPenalty", "value": "All", "description": "死亡惩罚（All 全部掉落）"},
+  {"name": "PlayerDamageRateAttack", "value": "1.500000", "description": "玩家攻击伤害倍率（强化攻击）"},
+  {"name": "PalDamageRateAttack", "value": "1.500000", "description": "帕鲁攻击伤害倍率（强化帕鲁攻击）"},
+  {"name": "bEnableFriendlyFire", "value": "False", "description": "关闭友军伤害"},
+  {"name": "ServerPlayerMaxNum", "value": "32", "description": "服务器最大玩家数（满员对战）"}
+]

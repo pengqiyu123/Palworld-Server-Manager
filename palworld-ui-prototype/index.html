@@ -1,0 +1,932 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Palworld 服务器管理器 · UI 原型（暖色磨砂玻璃 · 宠物风格）</title>
+<!--
+  ============================================================================
+  Palworld Server Manager — 高保真交互式 UI 原型（设计交付物）
+  视觉北极星：温暖、安静而可靠的「苹果桌面控制台」+ 幻兽帕鲁宠物风格
+  设计 token 与线上 Vue 应用 src/style.css 的 --palwarm-* 体系完全一致，
+  可直接据此落地为 Vue 组件。本文件为「设计原型 / 走查稿」，不改动任何业务代码。
+  窗口交互遵循《桌面窗口设计调研报告》结论：保留系统 caption 按钮（min/max/close），
+  内容扩展到标题栏区域，不在透明分层窗上自绘 chrome。
+  ============================================================================
+-->
+<style>
+/* ===================== 设计 Token（与线上 --palwarm-* 对齐） ===================== */
+:root{
+  --palwarm-background:#f5ede2;
+  --palwarm-foreground:#3f322c;
+  --palwarm-card:rgba(255,252,247,0.72);
+  --palwarm-card-strong:rgba(255,250,244,0.88);
+  --palwarm-card-foreground:#3f322c;
+  --palwarm-popover:rgba(255,250,244,0.92);
+  --palwarm-popover-foreground:#3f322c;
+  --palwarm-primary:#e66f51;       /* 珊瑚暖橙 */
+  --palwarm-primary-foreground:#ffffff;
+  --palwarm-primary-deep:#c9543a;
+  --palwarm-muted:rgba(255,255,255,0.5);
+  --palwarm-muted-foreground:#77675f;
+  --palwarm-border:rgba(116,88,72,0.14);
+  --palwarm-border-strong:rgba(116,88,72,0.22);
+  --palwarm-input:rgba(255,255,255,0.62);
+  --palwarm-ring:rgba(230,111,81,0.30);
+  --palwarm-radius-sm:12px;
+  --palwarm-radius-md:18px;
+  --palwarm-radius-lg:26px;
+  --palwarm-radius-panel:32px;
+  --palwarm-state-success:#4f8a6b;
+  --palwarm-state-warning:#b8782f;
+  --palwarm-state-error:#c9554d;
+  --palwarm-state-info:#4b7896;
+  --palwarm-font-sans:'Noto Sans SC','Microsoft YaHei',system-ui,-apple-system,'Segoe UI',sans-serif;
+  --palwarm-font-mono:'JetBrains Mono',ui-monospace,'SFMono-Regular',Consolas,monospace;
+  --palwarm-static-shadow:0 8px 28px -10px rgba(96,62,40,0.30);
+
+  --glass-bg:rgba(255,252,247,0.72);
+  --glass-bg-soft:rgba(255,250,244,0.50);
+  --glass-bg-strong:rgba(255,250,244,0.88);
+  --glass-border:rgba(116,88,72,0.14);
+  --glass-blur:blur(24px) saturate(145%);
+  --warm-shadow:0 8px 28px -10px rgba(96,62,40,0.28);
+
+  --primary:#e66f51;
+  --primary-active:#c9543a;
+  --primary-soft:rgba(230,111,81,0.14);
+  --green:#4f8a6b; --green-bg:rgba(79,138,107,0.14);
+  --red:#c9554d; --red-soft:#b8463f; --red-bg:rgba(201,85,77,0.12);
+  --amber:#b8782f; --amber-bg:rgba(184,120,47,0.14);
+  --purple:#9b6a9e; --purple-bg:rgba(155,106,158,0.14);
+  --blue:#4b7896; --blue-bg:rgba(75,120,150,0.14);
+  --text-hi:#3f322c; --text-mid:#77675f; --text-mid2:#8a7a6e;
+  --text-lo:#a39383; --text-dim:#bcae9f;
+  --border:rgba(116,88,72,0.16); --border-strong:rgba(116,88,72,0.24);
+  --border-blue:rgba(230,111,81,0.45);
+  --r-win:24px; --r-card:18px; --r-btn:12px; --r-btn-lg:14px; --r-input:10px; --r-pill:999px; --r-toggle:14px;
+  --font-ui:var(--palwarm-font-sans);
+  --font-mono:var(--palwarm-font-mono);
+  --shadow-primary:0 8px 22px -6px rgba(230,111,81,0.42);
+
+  /* —— 宠物风格扩展（Palworld Pals）—— */
+  --pal-grass:#7fae5a;  --pal-grass-bg:rgba(127,174,90,0.16);
+  --pal-fire:#e8734a;   --pal-fire-bg:rgba(232,115,74,0.16);
+  --pal-water:#5b9bd1;  --pal-water-bg:rgba(91,155,209,0.16);
+  --pal-electric:#e6b54a; --pal-electric-bg:rgba(230,181,74,0.18);
+  --pal-ice:#7fc4cf;    --pal-ice-bg:rgba(127,196,207,0.18);
+  --pal-dark:#6b5b73;   --pal-dark-bg:rgba(107,91,115,0.16);
+  --pal-neutral:#b89a7a;--pal-neutral-bg:rgba(184,154,122,0.18);
+  --cream:#fbf3e8; --cream-2:#f7eadd;
+  --space-1:4px; --space-2:8px; --space-3:12px; --space-4:16px; --space-5:20px;
+  --space-6:24px; --space-8:32px; --space-10:40px; --space-12:48px;
+}
+
+*{box-sizing:border-box;margin:0;padding:0}
+a{text-decoration:none;color:inherit}
+html,body{height:100%}
+body{
+  font-family:var(--font-ui);color:var(--text-hi);
+  -webkit-font-smoothing:antialiased;overflow:hidden;
+  background:
+    radial-gradient(90% 70% at 0% 0%, rgba(235,165,120,0.22), transparent 55%),
+    radial-gradient(80% 60% at 100% 0%, rgba(247,205,150,0.20), transparent 55%),
+    radial-gradient(120% 90% at 50% 110%, rgba(230,111,81,0.14), transparent 60%),
+    #f3e9dc;
+}
+#app{height:100%;width:100%;display:flex}
+
+/* ===================== 窗口外壳 ===================== */
+/* 遵循调研结论：保留系统窗口能力；此处自定义条为「内容扩展进标题栏」，
+   右侧 caption 按钮区为系统保留区（真实 Tauri 用 ExtendsContentIntoTitleBar + RightInset 预留）。 */
+.window{width:100%;height:100%;display:flex;flex-direction:column;overflow:hidden}
+.titlebar{
+  height:44px;flex:0 0 44px;display:flex;align-items:center;
+  justify-content:space-between;padding:0 8px 0 16px;user-select:none;
+  background:rgba(255,250,244,0.55);backdrop-filter:var(--glass-blur);
+  -webkit-backdrop-filter:var(--glass-blur);border-bottom:1px solid var(--glass-border);
+}
+.titlebar .drag-zone{display:flex;flex:1;align-items:center;gap:10px;height:100%;cursor:grab}
+.titlebar .drag-zone:active{cursor:grabbing}
+.app-icon{width:22px;height:22px;flex:0 0 22px}
+.app-name{font-size:13px;font-weight:600;color:var(--text-hi)}
+.drag-hint{font-size:11px;color:var(--text-lo)}
+.win-controls{display:flex;align-items:center;gap:2px}
+.win-btn{width:40px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:8px;cursor:pointer;transition:background .15s ease}
+.win-btn:hover{background:rgba(116,88,72,0.10)}
+.win-btn.close:hover{background:var(--red-bg)}
+.win-btn.close:hover svg path,.win-btn.close:hover svg rect{stroke:var(--red-soft)}
+.win-btn svg{width:13px;height:13px}
+
+.body{flex:1;display:flex;min-height:0}
+
+/* ===================== 侧边导航 ===================== */
+.sidebar{
+  width:228px;flex:0 0 228px;display:flex;flex-direction:column;gap:6px;
+  padding:14px 12px;background:rgba(255,248,240,0.42);
+  backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);
+  border-right:1px solid var(--glass-border);
+}
+.status-card{display:flex;align-items:center;gap:10px;padding:10px;background:var(--glass-bg-soft);
+  backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);
+  border:1px solid var(--glass-border);border-radius:14px}
+.status-dot{width:8px;height:8px;border-radius:4px;background:var(--text-lo);flex:0 0 8px}
+.status-dot.online{background:var(--green);box-shadow:0 0 8px rgba(79,138,107,.5)}
+.status-dot.error{background:var(--red)}
+.status-text{display:flex;flex-direction:column;gap:2px;min-width:0}
+.status-name{font-size:13px;font-weight:600;color:var(--text-hi);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.status-state{font-size:11px;color:var(--text-lo)}
+.nav-label{font-size:11px;font-weight:600;color:var(--text-lo);letter-spacing:1px;padding:8px 6px 0}
+.nav-item{display:flex;align-items:center;gap:10px;height:40px;padding:0 12px;border-radius:10px;cursor:pointer;
+  color:var(--text-mid);transition:background .15s ease,color .15s ease;position:relative}
+.nav-item .ico{flex:0 0 18px;display:flex}
+.nav-item .badge{margin-left:auto;font-size:10px;font-weight:600;padding:1px 7px;border-radius:999px;
+  background:var(--primary-soft);color:var(--primary-deep)}
+.nav-item:hover{background:rgba(116,88,72,0.08);color:var(--text-hi)}
+.nav-item.active{background:var(--primary-soft);color:var(--primary-deep);box-shadow:inset 3px 0 0 var(--primary)}
+.nav-item.active .ico svg path,.nav-item.active .ico svg circle,.nav-item.active .ico svg rect{stroke:var(--primary)}
+.nav-spacer{flex:1}
+.nav-divider{height:1px;background:var(--glass-border);margin:4px 0}
+.nav-version{font-family:var(--font-mono);font-size:11px;color:var(--text-dim);padding-left:6px;padding-top:4px}
+
+/* ===================== 主内容 ===================== */
+.main{flex:1;position:relative;min-width:0;overflow:hidden}
+.screen{position:absolute;inset:0;display:none;flex-direction:column;padding:24px 28px 28px;gap:18px;overflow-y:auto}
+.screen.active{display:flex}
+.page-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.page-title{font-size:22px;font-weight:700;color:var(--text-hi);display:flex;align-items:center;gap:10px}
+.page-title .pt-ico{width:26px;height:26px}
+.page-sub{font-size:13px;color:var(--text-mid2);margin-top:6px;line-height:20px;max-width:680px}
+.page-actions{display:flex;gap:10px;align-items:center;flex:0 0 auto}
+
+/* ===================== 按钮 ===================== */
+.btn{display:inline-flex;align-items:center;gap:6px;height:36px;padding:0 14px;border-radius:var(--r-btn);
+  border:none;cursor:pointer;font-family:var(--font-ui);font-size:13px;font-weight:600;
+  transition:filter .15s ease,transform .1s ease,background .15s ease,box-shadow .15s ease}
+.btn svg{width:15px;height:15px;flex:0 0 15px}
+.btn:active{transform:translateY(1px)}
+.btn:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
+.btn:disabled{opacity:.6;cursor:not-allowed;pointer-events:none}
+.btn-primary{background:linear-gradient(180deg,#ef7d5f 0%,#e66f51 100%);color:#fff;box-shadow:var(--shadow-primary)}
+.btn-primary:hover{filter:brightness(1.04)}
+.btn-ghost{background:var(--glass-bg-soft);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);
+  color:var(--text-mid);border:1px solid var(--glass-border);font-weight:500}
+.btn-ghost:hover{color:var(--text-hi);background:rgba(255,250,244,0.75)}
+.btn-success{background:var(--green);color:#fff}
+.btn-success:hover{filter:brightness(1.05)}
+.btn-danger{background:var(--red);color:#fff}
+.btn-danger:hover{filter:brightness(1.05)}
+.btn-danger-ghost{background:var(--red-bg);color:var(--red-soft);border:1px solid rgba(201,85,77,0.45)}
+.btn-danger-ghost:hover{background:rgba(201,85,77,0.18)}
+.btn-sm{height:30px;padding:0 11px;font-size:12px}
+.btn-lg{height:42px;padding:0 18px;font-size:14px;border-radius:var(--r-btn-lg)}
+
+/* ===================== 玻璃卡片 ===================== */
+.card{background:var(--glass-bg);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);
+  border:1px solid var(--glass-border);border-radius:var(--r-card);box-shadow:var(--warm-shadow);overflow:hidden}
+.card-pad{padding:18px 20px}
+.card-head{height:48px;display:flex;align-items:center;gap:10px;padding:0 18px;
+  background:rgba(255,250,244,0.55);border-bottom:1px solid var(--glass-border)}
+.card-head .ch-title{font-size:14px;font-weight:600;color:var(--text-hi)}
+.card-head .ch-sub{font-size:12px;color:var(--text-lo);margin-left:auto}
+
+/* ===================== 表单 ===================== */
+.input{height:40px;display:flex;align-items:center;gap:6px;padding:0 12px;border-radius:var(--r-input);
+  background:var(--input-bg);border:1px solid var(--glass-border);font-family:var(--font-mono);font-size:13px;color:var(--text-hi)}
+.input input{flex:1;background:none;border:none;outline:none;color:var(--text-hi);font-family:var(--font-ui);font-size:13px}
+.input:focus-within{border-color:var(--border-blue);box-shadow:0 0 0 3px var(--palwarm-ring)}
+.select{position:relative}
+.select select{appearance:none;height:40px;padding:0 34px 0 12px;border-radius:var(--r-input);background:var(--input-bg);
+  border:1px solid var(--glass-border);color:var(--text-hi);font-family:var(--font-ui);font-size:13px;cursor:pointer}
+.select::after{content:"";position:absolute;right:12px;top:50%;width:7px;height:7px;border-right:1.5px solid var(--text-mid);
+  border-bottom:1.5px solid var(--text-mid);transform:translateY(-70%) rotate(45deg);pointer-events:none}
+.toggle{width:40px;height:22px;border-radius:var(--r-toggle);background:rgba(116,88,72,0.22);position:relative;cursor:pointer;
+  transition:background .2s ease;flex:0 0 40px}
+.toggle.on{background:var(--green)}
+.toggle .knob{position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:9px;background:#fff;transition:left .2s ease}
+.toggle.on .knob{left:20px}
+
+/* ===================== 状态徽标 / 药丸 ===================== */
+.status-pill{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:var(--r-pill);
+  font-size:11px;font-weight:600}
+.status-pill .s-dot{width:7px;height:7px;border-radius:3.5px}
+.status-pill.ok{background:var(--green-bg);color:var(--green)} .status-pill.ok .s-dot{background:var(--green)}
+.status-pill.off{background:var(--amber-bg);color:var(--amber)} .status-pill.off .s-dot{background:var(--amber)}
+.status-pill.block{background:var(--red-bg);color:var(--red-soft)} .status-pill.block .s-dot{background:var(--red)}
+.status-pill.info{background:var(--blue-bg);color:var(--blue)} .status-pill.info .s-dot{background:var(--blue)}
+
+.chip{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:var(--r-pill);font-size:11px;font-weight:600}
+.chip.grass{background:var(--pal-grass-bg);color:var(--pal-grass)}
+.chip.fire{background:var(--pal-fire-bg);color:var(--pal-fire)}
+.chip.water{background:var(--pal-water-bg);color:var(--pal-water)}
+.chip.electric{background:var(--pal-electric-bg);color:var(--pal-electric)}
+.chip.ice{background:var(--pal-ice-bg);color:var(--pal-ice)}
+.chip.dark{background:var(--pal-dark-bg);color:var(--pal-dark)}
+.chip.neutral{background:var(--pal-neutral-bg);color:var(--pal-neutral)}
+
+/* ===================== 表格 ===================== */
+.table{width:100%;border-collapse:collapse}
+.table th{text-align:left;font-size:12px;font-weight:600;color:var(--text-lo);padding:10px 14px;border-bottom:1px solid var(--glass-border)}
+.table td{font-size:13px;color:var(--text-hi);padding:12px 14px;border-bottom:1px solid rgba(116,88,72,0.08);vertical-align:middle}
+.table tbody tr{transition:background .15s ease}
+.table tbody tr:hover{background:rgba(255,250,244,0.55)}
+.table tbody tr:last-child td{border-bottom:none}
+.row-actions{display:flex;gap:6px;justify-content:flex-end}
+
+/* ===================== 终端 ===================== */
+.terminal{flex:1;display:flex;flex-direction:column;border-radius:14px;background:rgba(54,42,34,0.62);
+  backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);
+  border:1px solid rgba(116,88,72,0.28);overflow:hidden;min-height:220px}
+.terminal .t-bar{height:32px;display:flex;align-items:center;gap:10px;padding:0 12px;
+  background:rgba(60,46,38,0.55);font-family:var(--font-mono);font-size:11px;color:var(--text-lo);flex:0 0 32px}
+.terminal .t-body{flex:1;padding:10px 14px;overflow-y:auto;display:flex;flex-direction:column;gap:2px;
+  font-family:var(--font-mono);font-size:12px;line-height:17px}
+.terminal .t-body .log-info{color:#7bbf9a}.terminal .t-body .log-cmd{color:#f0937a}
+.terminal .t-body .log-resp{color:#cdbfb2}.terminal .t-body .log-err{color:#e08a82}.terminal .t-body .log-sys{color:#a39383}
+.cmd-row{display:flex;align-items:center;gap:8px;height:44px}
+.cmd-prompt{font-family:var(--font-mono);font-size:15px;font-weight:700;color:var(--primary)}
+.cmd-box{flex:1;height:36px;display:flex;align-items:center;padding:0 10px;border-radius:var(--r-input);
+  background:var(--input-bg);border:1px solid var(--border-blue)}
+.cmd-box input{flex:1;background:none;border:none;outline:none;color:var(--text-hi);font-family:var(--font-mono);font-size:13px}
+
+/* ===================== 网格 / 布局工具 ===================== */
+.grid{display:grid;gap:16px}
+.grid-2{grid-template-columns:repeat(2,1fr)}
+.grid-3{grid-template-columns:repeat(3,1fr)}
+.grid-4{grid-template-columns:repeat(4,1fr)}
+.row{display:flex;gap:14px}
+.col{display:flex;flex-direction:column;gap:14px}
+.between{justify-content:space-between}
+.center{align-items:center}
+.wrap{flex-wrap:wrap}
+.grow{flex:1;min-width:0}
+.muted{color:var(--text-mid)}
+.lo{color:var(--text-lo)}
+.mono{font-family:var(--font-mono)}
+.t12{font-size:12px}.t13{font-size:13px}.t14{font-size:14px}.t16{font-size:16px}.t18{font-size:18px}.t20{font-size:20px}
+.w600{font-weight:600}.w700{font-weight:700}
+
+/* ===================== 统计卡 / 仪表 ===================== */
+.stat-card{padding:16px 18px;display:flex;flex-direction:column;gap:8px}
+.stat-card .s-top{display:flex;align-items:center;gap:8px;color:var(--text-mid);font-size:12px}
+.stat-card .s-ico{width:30px;height:30px;border-radius:9px;display:flex;align-items:center;justify-content:center;flex:0 0 30px}
+.stat-card .s-val{font-size:24px;font-weight:700;color:var(--text-hi);font-family:var(--font-mono)}
+.stat-card .s-val small{font-size:13px;color:var(--text-lo);font-weight:500;font-family:var(--font-ui)}
+.gauge{height:8px;border-radius:4px;background:rgba(116,88,72,0.14);overflow:hidden}
+.gauge>i{display:block;height:100%;border-radius:4px;background:linear-gradient(90deg,#ef7d5f,#e66f51)}
+
+/* ===================== 宠物 / 帕鲁 视觉 ===================== */
+.pal-avatar{width:56px;height:56px;border-radius:18px;display:flex;align-items:center;justify-content:center;flex:0 0 56px;
+  background:var(--cream);border:1px solid var(--glass-border);box-shadow:inset 0 -3px 8px rgba(116,88,72,0.06)}
+.pal-avatar svg{width:46px;height:46px}
+.pal-avatar.sm{width:40px;height:40px;border-radius:13px;flex:0 0 40px}
+.pal-avatar.sm svg{width:32px;height:32px}
+.pal-avatar.lg{width:72px;height:72px;border-radius:22px;flex:0 0 72px}
+.pal-avatar.lg svg{width:60px;height:60px}
+@keyframes palBob{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}}
+.pal-avatar.bob svg{animation:palBob 2.4s ease-in-out infinite}
+.paw{width:18px;height:18px;opacity:.7}
+.creature-gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:16px}
+.pal-card{padding:16px;display:flex;flex-direction:column;gap:12px;align-items:center;text-align:center;
+  background:var(--glass-bg);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);
+  border:1px solid var(--glass-border);border-radius:var(--r-card);transition:transform .15s ease,box-shadow .15s ease}
+.pal-card:hover{transform:translateY(-3px);box-shadow:var(--warm-shadow)}
+.pal-card .pc-name{font-size:15px;font-weight:600;color:var(--text-hi)}
+.pal-card .pc-meta{font-size:12px;color:var(--text-mid2)}
+.pal-card .pc-bar{width:100%}
+.pal-card .pc-bar .lbl{display:flex;justify-content:space-between;font-size:11px;color:var(--text-lo);margin-bottom:4px}
+.companion{display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:14px;
+  background:var(--glass-bg-soft);border:1px solid var(--glass-border)}
+.companion .c-info{display:flex;flex-direction:column;gap:2px;min-width:0}
+.companion .c-name{font-size:14px;font-weight:600;color:var(--text-hi)}
+.companion .c-state{font-size:12px;color:var(--text-mid2)}
+
+/* ===================== 配置组 ===================== */
+.cfg-group{border:1px solid var(--glass-border);border-radius:var(--r-card);background:var(--glass-bg);
+  backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);overflow:hidden}
+.cfg-group-head{height:46px;display:flex;align-items:center;gap:10px;padding:0 16px;
+  background:rgba(255,250,244,0.55);cursor:pointer;user-select:none}
+.cfg-group-head .g-title{font-size:14px;font-weight:600;color:var(--text-hi)}
+.cfg-group-head .g-count{font-size:11px;color:var(--text-lo)}
+.cfg-group-head .chevron{margin-left:auto;transition:transform .2s ease;color:var(--text-lo)}
+.cfg-group.collapsed .chevron{transform:rotate(-90deg)}
+.cfg-group-body{display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:16px 20px}
+.cfg-group.collapsed .cfg-group-body{display:none}
+.cfg-item{display:flex;flex-direction:column;gap:6px}
+.cfg-item .row{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.cfg-item .label{display:flex;align-items:center;gap:6px;min-width:0}
+.cfg-item .label .name{font-size:13px;font-weight:500;color:var(--text-mid);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cfg-value{display:inline-flex;align-items:center;gap:6px;padding:7px 12px;border-radius:var(--r-input);
+  background:var(--input-bg);border:1px solid var(--glass-border);font-family:var(--font-mono);font-size:14px;color:var(--text-hi);
+  min-width:84px;justify-content:center;cursor:text}
+.cfg-item.dirty .cfg-value{border-color:var(--border-blue);box-shadow:0 0 0 3px var(--palwarm-ring)}
+.cfg-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px}
+.cfg-tab{padding:7px 13px;border-radius:999px;font-size:13px;font-weight:500;cursor:pointer;color:var(--text-mid);
+  background:var(--glass-bg-soft);border:1px solid var(--glass-border);transition:.15s}
+.cfg-tab:hover{color:var(--text-hi)}
+.cfg-tab.active{background:var(--primary-soft);color:var(--primary-deep);border-color:var(--border-blue)}
+
+.tip{width:15px;height:15px;flex:0 0 15px;border-radius:7.5px;background:rgba(230,111,81,0.14);
+  display:inline-flex;align-items:center;justify-content:center;cursor:help;position:relative}
+.tip svg{width:15px;height:15px}
+
+/* ===================== 空态 / 骨架 ===================== */
+.empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;color:var(--text-lo);text-align:center;padding:40px}
+.empty .ph-ico{width:64px;height:64px;opacity:.55}
+.empty h3{font-size:18px;font-weight:600;color:var(--text-mid)}
+.empty p{font-size:13px;max-width:400px;line-height:20px}
+.skeleton{background:linear-gradient(90deg,rgba(116,88,72,0.08) 25%,rgba(116,88,72,0.16) 37%,rgba(116,88,72,0.08) 63%);
+  background-size:400% 100%;animation:sk 1.4s ease infinite;border-radius:8px}
+@keyframes sk{0%{background-position:100% 0}100%{background-position:-100% 0}}
+.sk-line{height:12px;margin:8px 0}
+.sk-block{height:120px}
+
+/* ===================== Toast / Modal / Tooltip ===================== */
+.toast-host{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;gap:10px;z-index:9998}
+.toast{display:flex;align-items:center;gap:10px;padding:12px 16px;border-radius:14px;min-width:240px;max-width:360px;
+  background:var(--palwarm-popover);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);
+  border:1px solid var(--glass-border);box-shadow:var(--warm-shadow);font-size:13px;color:var(--text-hi)}
+.toast .t-ico{width:20px;height:20px;flex:0 0 20px}
+.toast.success{border-left:3px solid var(--green)}
+.toast.error{border-left:3px solid var(--red)}
+.toast.info{border-left:3px solid var(--blue)}
+.toast-enter{animation:toastIn .25s ease}
+@keyframes toastIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+
+.modal-mask{position:fixed;inset:0;background:rgba(63,50,44,0.28);backdrop-filter:blur(3px);display:flex;
+  align-items:center;justify-content:center;z-index:9997;opacity:0;pointer-events:none;transition:opacity .18s ease}
+.modal-mask.show{opacity:1;pointer-events:auto}
+.modal{width:420px;max-width:92vw;padding:22px;background:var(--palwarm-popover);
+  backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);border-radius:var(--r-card);
+  border:1px solid var(--glass-border);box-shadow:var(--warm-shadow);transform:translateY(8px);transition:transform .18s ease}
+.modal-mask.show .modal{transform:translateY(0)}
+.modal h3{font-size:17px;font-weight:700;color:var(--text-hi);margin-bottom:8px;display:flex;align-items:center;gap:8px}
+.modal p{font-size:13px;color:var(--text-mid);line-height:20px;margin-bottom:18px}
+.modal .m-actions{display:flex;justify-content:flex-end;gap:10px}
+
+.app-tooltip{position:fixed;z-index:9999;max-width:280px;background:var(--palwarm-popover);
+  backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);border:1px solid var(--glass-border);
+  border-radius:12px;padding:10px 12px;font-size:12px;line-height:17px;color:var(--text-mid);box-shadow:var(--warm-shadow);pointer-events:none}
+.app-tooltip b{color:var(--text-hi);font-weight:600}
+.app-tooltip .t-impact{color:var(--primary-deep)}
+
+/* 滚动条 */
+.screen::-webkit-scrollbar,.terminal .t-body::-webkit-scrollbar{width:8px}
+.screen::-webkit-scrollbar-thumb,.terminal .t-body::-webkit-scrollbar-thumb{background:rgba(116,88,72,0.28);border-radius:4px}
+.screen::-webkit-scrollbar-thumb:hover{background:rgba(116,88,72,0.42)}
+
+/* 顶部信息条（服务器运行态） */
+.livebar{display:flex;align-items:center;gap:14px;padding:12px 16px;border-radius:14px;flex-wrap:wrap;
+  background:var(--glass-bg-soft);border:1px solid var(--glass-border)}
+.livebar .lb-item{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--text-mid)}
+.livebar .lb-item b{color:var(--text-hi);font-family:var(--font-mono)}
+.livebar .grow{justify-content:flex-end}
+
+@media (max-width:880px){
+  .grid-2,.grid-3,.grid-4{grid-template-columns:1fr}
+  .cfg-group-body{grid-template-columns:1fr}
+  .sidebar{width:64px;flex:0 0 64px}
+  .nav-item span,.status-text,.nav-label,.nav-version{display:none}
+  .nav-item{justify-content:center;padding:0}
+  .nav-item .badge{display:none}
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="window">
+
+    <!-- ============ 标题栏（内容扩展进标题栏；右侧 caption 按钮为系统保留区） ============ -->
+    <header class="titlebar">
+      <div class="drag-zone">
+        <svg class="app-icon" viewBox="0 0 24 24" fill="none">
+          <circle cx="12" cy="12" r="10" fill="#f0e2d4" stroke="#e66f51" stroke-width="1.6"/>
+          <circle cx="12" cy="12" r="5.5" fill="#f7eadd" stroke="#e66f51" stroke-width="1.6"/>
+          <circle cx="10.2" cy="11" r="1.1" fill="#3f322c"/><circle cx="13.8" cy="11" r="1.1" fill="#3f322c"/>
+          <path d="M10.5 13.6c.6.7 2.4.7 3 0" stroke="#c9543a" stroke-width="1.2" stroke-linecap="round"/>
+          <path d="M8.5 7.5 9.6 9M15.5 7.5 14.4 9" stroke="#e66f51" stroke-width="1.4" stroke-linecap="round"/>
+        </svg>
+        <span class="app-name">Palworld 服务器管理器</span>
+        <span class="drag-hint">· 运行中</span>
+      </div>
+      <!-- 系统保留区：真实 Tauri 用 ExtendsContentIntoTitleBar + RightInset 预留，不应用自绘 -->
+      <div class="win-controls">
+        <div class="win-btn" title="最小化"><svg viewBox="0 0 13 13"><path d="M2.5 6.5h8" stroke="#77675f" stroke-width="1.3" stroke-linecap="round"/></svg></div>
+        <div class="win-btn" title="最大化"><svg viewBox="0 0 13 13"><rect x="3" y="3.5" width="7" height="6" rx="1" fill="none" stroke="#77675f" stroke-width="1.3"/></svg></div>
+        <div class="win-btn close" title="关闭"><svg viewBox="0 0 13 13"><path d="M3.5 3.5l6 6M9.5 3.5l-6 6" stroke="#77675f" stroke-width="1.3" stroke-linecap="round"/></svg></div>
+      </div>
+    </header>
+
+    <div class="body">
+      <!-- ============ 侧边导航 ============ -->
+      <aside class="sidebar">
+        <div class="status-card">
+          <span class="status-dot online"></span>
+          <div class="status-text">
+            <span class="status-name">幻兽帕鲁服务端</span>
+            <span class="status-state">在线 · 12 人在线</span>
+          </div>
+        </div>
+        <div class="nav-label">导航</div>
+        <div class="nav-item active" data-nav="overview"><span class="ico">📊</span><span>概览</span></div>
+        <div class="nav-item" data-nav="players"><span class="ico">🐾</span><span>玩家管理</span></div>
+        <div class="nav-item" data-nav="config"><span class="ico">⚙️</span><span>配置</span></div>
+        <div class="nav-item" data-nav="network"><span class="ico">🌐</span><span>网络</span></div>
+        <div class="nav-item" data-nav="rcon"><span class="ico">💻</span><span>RCON 控制台</span></div>
+        <div class="nav-item" data-nav="logs"><span class="ico">📜</span><span>实时日志</span></div>
+        <div class="nav-item" data-nav="backup"><span class="ico">💾</span><span>配置备份</span></div>
+        <div class="nav-spacer"></div>
+        <div class="nav-divider"></div>
+        <div class="nav-item" data-nav="settings"><span class="ico">🎛️</span><span>设置</span></div>
+        <div class="nav-version">v2.4.0 · 暖色玻璃</div>
+      </aside>
+
+      <!-- ============ 主内容区 ============ -->
+      <main class="main">
+
+        <!-- ===================== 概览 ===================== -->
+        <section class="screen active" data-page="overview">
+          <div class="page-head">
+            <div>
+              <div class="page-title"><svg class="pt-ico" viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="5" stroke="#e66f51" stroke-width="1.6"/><path d="M7 14l3 3 7-7" stroke="#e66f51" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>服务器概览</div>
+              <div class="page-sub">一眼掌握服务器健康度、在线玩家与近期事件。所有数据来自后端检测 / RCON 轮询。</div>
+            </div>
+            <div class="page-actions">
+              <button class="btn btn-ghost btn-sm" onclick="toast('info','已刷新概览数据')"><svg viewBox="0 0 15 15" fill="none"><path d="M13 7.5a5 5 0 1 1-1.5-3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M13 2v3h-3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>刷新</button>
+              <button class="btn btn-primary" onclick="toast('success','已向玩家广播重启预告')"><svg viewBox="0 0 15 15" fill="none"><path d="M3 7.5 12 3l-2 4 2 4z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>广播 /Broadcast</button>
+            </div>
+          </div>
+
+          <div class="livebar">
+            <div class="lb-item"><span class="status-pill ok"><span class="s-dot"></span>运行中</span></div>
+            <div class="lb-item">版本 <b>v0.3.5</b></div>
+            <div class="lb-item"> uptime <b>3d 14h</b></div>
+            <div class="lb-item">TPS <b>29.8</b></div>
+            <div class="lb-item grow">地址 <b>100.64.12.7:8211</b></div>
+          </div>
+
+          <div class="grid grid-4">
+            <div class="card stat-card">
+              <div class="s-top"><span class="s-ico" style="background:var(--green-bg)">👥</span>在线玩家</div>
+              <div class="s-val">12 <small>/ 32</small></div>
+              <div class="gauge"><i style="width:38%"></i></div>
+            </div>
+            <div class="card stat-card">
+              <div class="s-top"><span class="s-ico" style="background:var(--pal-fire-bg)">🏕️</span>玩家基地</div>
+              <div class="s-val">18</div>
+              <div class="s-top" style="margin-top:2px">分布 7 个岛屿</div>
+            </div>
+            <div class="card stat-card">
+              <div class="s-top"><span class="s-ico" style="background:var(--blue-bg)">🧠</span>内存占用</div>
+              <div class="s-val">5.4 <small>GB</small></div>
+              <div class="gauge"><i style="width:62%"></i></div>
+            </div>
+            <div class="card stat-card">
+              <div class="s-top"><span class="s-ico" style="background:var(--amber-bg)">💽</span>磁盘</div>
+              <div class="s-val">68 <small>%</small></div>
+              <div class="gauge"><i style="width:68%"></i></div>
+            </div>
+          </div>
+
+          <div class="row" style="align-items:stretch">
+            <div class="card grow" style="display:flex;flex-direction:column">
+              <div class="card-head"><span class="ch-title">👥 在线玩家</span><span class="ch-sub">实时 · 12 人</span></div>
+              <div class="card-pad col" style="gap:10px" id="ovPlayers"></div>
+            </div>
+
+            <div class="card" style="width:360px;flex:0 0 360px;display:flex;flex-direction:column">
+              <div class="card-head"><span class="ch-title">⏱️ 近期事件</span></div>
+              <div class="card-pad col" style="gap:10px">
+                <div class="row between center"><span class="t13">玩家 <b>Aki</b> 加入服务器</span><span class="lo t12">2 分钟前</span></div>
+                <div class="row between center"><span class="t13">自动备份完成 #042</span><span class="lo t12">1 小时前</span></div>
+                <div class="row between center"><span class="t13">⚠️ 内存使用超 60%</span><span class="lo t12">3 小时前</span></div>
+                <div class="row between center"><span class="t13">⚡ 自动重启任务已排程</span><span class="lo t12">昨天</span></div>
+                <div class="row between center"><span class="t13">RCON 重启预告已广播</span><span class="lo t12">昨天</span></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ===================== 玩家管理（RCON 玩家管理核心页） ===================== -->
+        <section class="screen" data-page="players">
+          <div class="page-head">
+            <div>
+              <div class="page-title"><span>🐾</span>玩家管理</div>
+              <div class="page-sub">通过 RCON 管理在线玩家：私聊、踢出、封禁。数据来自 <span class="mono">ShowPlayers</span> 轮询，所有操作即时生效。</div>
+            </div>
+            <div class="page-actions">
+              <div class="input" style="width:200px"><svg width="15" height="15" viewBox="0 0 16 16" fill="none"><circle cx="7" cy="7" r="4.5" stroke="#77675f" stroke-width="1.4"/><path d="M10.5 10.5 14 14" stroke="#77675f" stroke-width="1.4" stroke-linecap="round"/></svg><input placeholder="搜索玩家 / SteamID" /></div>
+              <button class="btn btn-primary" onclick="toast('success','已刷新玩家列表')"><svg viewBox="0 0 15 15" fill="none"><path d="M13 7.5a5 5 0 1 1-1.5-3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M13 2v3h-3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>刷新列表</button>
+            </div>
+          </div>
+
+          <div class="grid grid-3" style="margin-bottom:16px">
+            <div class="card stat-card"><div class="s-top"><span class="s-ico" style="background:var(--green-bg)">👥</span>在线玩家</div><div class="s-val">12 <small>/ 32</small></div></div>
+            <div class="card stat-card"><div class="s-top"><span class="s-ico" style="background:var(--amber-bg)">⏸️</span>挂机/可疑</div><div class="s-val">1</div></div>
+            <div class="card stat-card"><div class="s-top"><span class="s-ico" style="background:var(--red-bg)">🚫</span>已封禁</div><div class="s-val">1</div></div>
+          </div>
+
+          <div class="card">
+            <div class="card-head"><span class="ch-title">👥 在线玩家</span><span class="ch-sub">RCON /ShowPlayers · 12 人</span></div>
+            <div style="overflow-x:auto">
+              <table class="table">
+                <thead><tr><th>玩家</th><th>SteamID</th><th>等级</th><th>坐标</th><th>状态</th><th style="text-align:right">操作</th></tr></thead>
+                <tbody id="playerTbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="card" style="padding:14px 18px;display:flex;align-items:center;gap:14px">
+            <span class="pal-avatar bob" data-pal="grass"></span>
+            <div class="col" style="gap:2px">
+              <div class="t14 w600">你的服务器小伙伴</div>
+              <div class="t12 muted">照顾好服务器，也照顾好在这里冒险的帕鲁 🐾（装饰性吉祥物，不参与统计）</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ===================== 配置 ===================== -->
+        <section class="screen" data-page="config">
+          <div class="page-head">
+            <div>
+              <div class="page-title"><span>⚙️</span>服务器配置</div>
+              <div class="page-sub">图形化编辑 <span class="mono">PalWorldSettings.ini</span> 的 100+ 参数，按类别分组。修改后点击「应用并写盘」自动备份。</div>
+            </div>
+            <div class="page-actions">
+              <button class="btn btn-ghost" onclick="toast('info','已还原未保存的修改')">撤销改动</button>
+              <button class="btn btn-primary" onclick="applyConfig()"><svg viewBox="0 0 15 15" fill="none"><path d="M3 7.5 12 3l-2 4 2 4z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>应用并写盘</button>
+            </div>
+          </div>
+
+          <div class="cfg-tabs" id="cfgTabs"></div>
+          <div id="cfgGroups"></div>
+        </section>
+
+        <!-- ===================== 网络 ===================== -->
+        <section class="screen" data-page="network">
+          <div class="page-head">
+            <div>
+              <div class="page-title"><span>🌐</span>网络与连接</div>
+              <div class="page-sub">管理游戏 / RCON 端口、虚拟局域网与系统防火墙，确保朋友能顺利连进来。</div>
+            </div>
+            <div class="page-actions"><button class="btn btn-primary" onclick="toast('success','端口检测完成，全部正常')">检测端口</button></div>
+          </div>
+
+          <div class="row">
+            <div class="card port-card grow">
+              <div class="p-head"><div class="p-left"><span class="p-icon" style="background:var(--green-bg)">🎮</span><span class="p-title">游戏端口 8211 (UDP)</span></div><span class="status-pill ok"><span class="s-dot"></span>已开放</span></div>
+              <div class="p-body"><div class="p-info"><span class="p-proto">UDP · 默认</span><span class="p-desc">玩家加入服务器使用的主端口，需在防火墙放行。</span></div></div>
+            </div>
+            <div class="card port-card grow">
+              <div class="p-head"><div class="p-left"><span class="p-icon" style="background:var(--green-bg)">💻</span><span class="p-title">RCON 端口 25575 (TCP)</span></div><span class="status-pill ok"><span class="s-dot"></span>已开放</span></div>
+              <div class="p-body"><div class="p-info"><span class="p-proto">TCP · 管理</span><span class="p-desc">RCON 控制台连接端口，建议仅内网或设强密码。</span></div></div>
+            </div>
+          </div>
+
+          <div class="row" style="align-items:stretch">
+            <div class="card vpn-card">
+              <span class="v-icon" style="background:var(--blue-bg)">🔗</span>
+              <div class="v-info"><span class="v-title">虚拟局域网 (ZeroTier)</span><span class="v-desc">为异地朋友提供稳定内网地址，避免公网暴露。</span>
+                <div class="v-stat"><span class="v-dot"></span><span class="v-ip">100.64.12.7</span><span class="lo t12">· 3 名成员</span></div></div>
+            </div>
+            <div class="card fw-card grow">
+              <span class="f-icon" style="background:var(--pal-fire-bg)">🛡️</span>
+              <div class="f-info"><span class="f-title">Windows 防火墙</span><span class="f-desc">已为 PalServer.exe 自动添加入站规则。</span></div>
+              <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="toast('success','已重新同步防火墙规则')">同步规则</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- ===================== RCON ===================== -->
+        <section class="screen" data-page="rcon">
+          <div class="page-head">
+            <div>
+              <div class="page-title"><span>💻</span>RCON 控制台</div>
+              <div class="page-sub">直连服务器执行命令；常用指令一键发送，玩家管理在「玩家管理」页完成。</div>
+            </div>
+            <div class="page-actions">
+              <span class="status-pill ok"><span class="s-dot"></span>已连接</span>
+              <button class="btn btn-danger-ghost btn-sm" onclick="toast('error','已断开 RCON 连接')">断开</button>
+            </div>
+          </div>
+          <div class="conn-form card" style="height:auto;padding:12px 14px;flex-direction:column;gap:10px;align-items:stretch">
+            <div class="row"><div class="input grow"><span class="mono">25575</span></div><div class="input grow" style="flex:2"><input value="••••••••••" /></div><button class="btn btn-primary btn-sm" onclick="toast('success','RCON 已连接')">连接</button></div>
+            <div class="quick-row">
+              <button class="qbtn" onclick="termCmd('Info')">Info</button>
+              <button class="qbtn" onclick="termCmd('ShowPlayers')">ShowPlayers</button>
+              <button class="qbtn" onclick="termCmd('Broadcast 服务器将于 10 分钟后重启')">Broadcast</button>
+              <button class="qbtn" onclick="termCmd('Save')">Save</button>
+              <button class="qbtn danger" onclick="termCmd('Shutdown')">Shutdown</button>
+            </div>
+          </div>
+          <div class="terminal">
+            <div class="t-bar"><span>● RCON · 100.64.12.7:25575</span><span style="margin-left:auto">已连接 03:14</span></div>
+            <div class="t-body" id="termBody">
+              <div class="log-sys">[系统] RCON 连接已建立</div>
+              <div class="log-info">[信息] 服务器版本 v0.3.5 · 在线 12/32</div>
+            </div>
+            <div class="cmd-row" style="padding:0 12px"><span class="cmd-prompt">&gt;</span><div class="cmd-box"><input id="cmdInput" placeholder="输入 RCON 命令，回车发送…" onkeydown="if(event.key==='Enter')termCmd(this.value)" /></div></div>
+          </div>
+        </section>
+
+        <!-- ===================== 实时日志 ===================== -->
+        <section class="screen" data-page="logs">
+          <div class="page-head">
+            <div>
+              <div class="page-title"><span>📜</span>实时日志</div>
+              <div class="page-sub">滚动查看服务端输出，可按级别过滤。错误与警告高亮，便于排障。</div>
+            </div>
+            <div class="page-actions">
+              <div class="cfg-tabs" style="margin:0">
+                <span class="cfg-tab active" onclick="filterLogs(this,'all')">全部</span>
+                <span class="cfg-tab" onclick="filterLogs(this,'info')">信息</span>
+                <span class="cfg-tab" onclick="filterLogs(this,'warn')">警告</span>
+                <span class="cfg-tab" onclick="filterLogs(this,'error')">错误</span>
+              </div>
+              <button class="btn btn-ghost btn-sm" onclick="toast('info','日志已暂停滚动')">暂停</button>
+            </div>
+          </div>
+          <div class="terminal" style="min-height:0">
+            <div class="t-bar"><span>● PalServer.log</span><span style="margin-left:auto">跟随中 · 142 行</span></div>
+            <div class="t-body" id="logBody"></div>
+          </div>
+        </section>
+
+        <!-- ===================== 配置备份 ===================== -->
+        <section class="screen" data-page="backup">
+          <div class="page-head">
+            <div>
+              <div class="page-title"><span>💾</span>配置备份</div>
+              <div class="page-sub">每次写盘自动生成备份（最多保留 20 份）。可随时还原到任意历史版本。</div>
+            </div>
+            <div class="page-actions"><button class="btn btn-primary" onclick="createBackup()"><svg viewBox="0 0 15 15" fill="none"><path d="M7.5 3v9M3 7.5h9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>立即备份</button></div>
+          </div>
+          <div class="card">
+            <div class="card-head"><span class="ch-title">备份历史</span><span class="ch-sub">保留最近 20 份</span></div>
+            <div style="overflow-x:auto">
+              <table class="table">
+                <thead><tr><th>名称</th><th>时间</th><th>大小</th><th>来源</th><th style="text-align:right">操作</th></tr></thead>
+                <tbody id="backupTbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- ===================== 设置 ===================== -->
+        <section class="screen" data-page="settings">
+          <div class="page-head">
+            <div>
+              <div class="page-title"><span>🎛️</span>设置</div>
+              <div class="page-sub">外观、窗口行为与更新偏好。窗口部分遵循调研结论：保留系统标题栏能力，不在透明分层窗上自绘。</div>
+            </div>
+          </div>
+          <div class="grid grid-2">
+            <div class="card card-pad col">
+              <h3 class="t16 w700">🎨 外观</h3>
+              <div class="cfg-item"><div class="row"><span class="label"><span class="name">主题</span></span>
+                <div class="select"><select><option>暖色磨砂玻璃（默认）</option><option>浅色</option><option>跟随系统</option></select></div></div></div>
+              <div class="cfg-item"><div class="row"><span class="label"><span class="name">界面缩放</span></span>
+                <div class="select"><select><option>100%</option><option>110%</option><option>125%</option></select></div></div></div>
+              <div class="cfg-item"><div class="row"><span class="label"><span class="name">界面动效</span><span class="tip" data-tip="装饰性宠物图标会轻微浮动（低性能设备可关闭）。"><svg viewBox="0 0 15 15" fill="none"><circle cx="7.5" cy="7.5" r="6" stroke="#e66f51" stroke-width="1.2"/><path d="M7.5 6.8V10" stroke="#e66f51" stroke-width="1.2" stroke-linecap="round"/><circle cx="7.5" cy="5" r=".7" fill="#e66f51"/></svg></span></span><div class="toggle on" onclick="this.classList.toggle('on')"></div></div></div>
+            </div>
+            <div class="card card-pad col">
+              <h3 class="t16 w700">🪟 窗口行为</h3>
+              <div class="cfg-item"><div class="row"><span class="label"><span class="name">标题栏</span><span class="tip" data-tip="保留系统 caption 按钮（最小化/最大化/关闭），内容扩展到标题栏区域。推荐，避免无边框导致的拖拽/点击失效。"><svg viewBox="0 0 15 15" fill="none"><circle cx="7.5" cy="7.5" r="6" stroke="#e66f51" stroke-width="1.2"/><path d="M7.5 6.8V10" stroke="#e66f51" stroke-width="1.2" stroke-linecap="round"/><circle cx="7.5" cy="5" r=".7" fill="#e66f51"/></svg></span></span>
+                <div class="select"><select><option>系统标题栏 + 内容扩展（推荐）</option><option>无边框（不推荐）</option></select></div></div></div>
+              <div class="cfg-item"><div class="row"><span class="label"><span class="name">毛玻璃材质</span><span class="tip" data-tip="优先使用系统原生材质（Win11 Mica）。透明全窗会丢失原生阴影与 Aero Snap。"><svg viewBox="0 0 15 15" fill="none"><circle cx="7.5" cy="7.5" r="6" stroke="#e66f51" stroke-width="1.2"/><path d="M7.5 6.8V10" stroke="#e66f51" stroke-width="1.2" stroke-linecap="round"/><circle cx="7.5" cy="5" r=".7" fill="#e66f51"/></svg></span></span>
+                <div class="select"><select><option>系统原生（Mica）</option><option>CSS 玻璃（关闭透明窗）</option></select></div></div></div>
+              <div class="cfg-item"><div class="row"><span class="label"><span class="name">关闭时最小化到托盘</span></span><div class="toggle on" onclick="this.classList.toggle('on')"></div></div></div>
+            </div>
+            <div class="card card-pad col">
+              <h3 class="t16 w700">🔔 通知</h3>
+              <div class="cfg-item"><div class="row"><span class="label"><span class="name">玩家加入提醒</span></span><div class="toggle on" onclick="this.classList.toggle('on')"></div></div></div>
+              <div class="cfg-item"><div class="row"><span class="label"><span class="name">资源占用预警</span></span><div class="toggle on" onclick="this.classList.toggle('on')"></div></div></div>
+            </div>
+            <div class="card card-pad col">
+              <h3 class="t16 w700">⬆️ 更新</h3>
+              <div class="cfg-item"><div class="row"><span class="label"><span class="name">自动检查更新</span></span><div class="toggle on" onclick="this.classList.toggle('on')"></div></div></div>
+              <div class="row between center"><span class="muted t13">当前版本 v2.4.0</span><button class="btn btn-ghost btn-sm" onclick="toast('info','已是最新版本')">检查更新</button></div>
+            </div>
+          </div>
+        </section>
+
+      </main>
+    </div>
+  </div>
+</div>
+
+<div class="toast-host" id="toastHost"></div>
+<div class="modal-mask" id="modalMask">
+  <div class="modal">
+    <h3 id="modalTitle">确认操作</h3>
+    <p id="modalText">确定要执行该操作吗？</p>
+    <div class="m-actions">
+      <button class="btn btn-ghost" onclick="closeModal()">取消</button>
+      <button class="btn btn-danger" id="modalOk">确认</button>
+    </div>
+  </div>
+</div>
+<div class="app-tooltip" id="tooltip" style="display:none"></div>
+
+<script>
+/* ============ 导航切换 ============ */
+function goNav(page){
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('active',n.dataset.nav===page));
+  document.querySelectorAll('.screen').forEach(s=>s.classList.toggle('active',s.dataset.page===page));
+}
+document.querySelectorAll('.nav-item').forEach(n=>n.addEventListener('click',()=>goNav(n.dataset.nav)));
+
+/* ============ 帕鲁生物 SVG 生成（宠物风格核心视觉） ============ */
+function palAvatar(type){
+  const c={
+    grass:{body:'#bfe0a0',belly:'#eef6e0',acc:'#7fae5a'},
+    fire:{body:'#f4b59a',belly:'#fde9df',acc:'#e8734a'},
+    water:{body:'#a9cdee',belly:'#e6f1fb',acc:'#5b9bd1'},
+    electric:{body:'#f3da92',belly:'#fbf2d4',acc:'#e6b54a'},
+    ice:{body:'#bfe6ec',belly:'#eaf7f9',acc:'#7fc4cf'},
+    dark:{body:'#b6a6bf',belly:'#e9e1ee',acc:'#6b5b73'},
+    neutral:{body:'#e2cdb4',belly:'#f6ecde',acc:'#b89a7a'}
+  }[type]||{body:'#e2cdb4',belly:'#f6ecde',acc:'#b89a7a'};
+  return `<svg viewBox="0 0 64 64" fill="none">
+    <ellipse cx="32" cy="54" rx="16" ry="4" fill="rgba(116,88,72,0.10)"/>
+    <path d="M20 22c-3-6-9-7-9-2 0 4 5 7 9 5z" fill="${c.acc}"/>
+    <path d="M44 22c3-6 9-7 9-2 0 4-5 7-9 5z" fill="${c.acc}"/>
+    <circle cx="32" cy="34" r="20" fill="${c.body}"/>
+    <ellipse cx="32" cy="40" rx="12" ry="11" fill="${c.belly}"/>
+    <circle cx="24" cy="30" r="3.4" fill="#3f322c"/><circle cx="40" cy="30" r="3.4" fill="#3f322c"/>
+    <circle cx="25.2" cy="29" r="1.1" fill="#fff"/><circle cx="41.2" cy="29" r="1.1" fill="#fff"/>
+    <circle cx="27" cy="36" r="2.4" fill="${c.acc}" opacity=".5"/><circle cx="37" cy="36" r="2.4" fill="${c.acc}" opacity=".5"/>
+    <path d="M28 39c2.4 2.4 5.6 2.4 8 0" stroke="${c.acc}" stroke-width="1.8" stroke-linecap="round"/>
+    <path d="M32 8l2.4 4.4L39 15l-4.6 1.4L32 21l-2.4-4.6L25 15l4.6-2.6z" fill="${c.acc}"/>
+  </svg>`;
+}
+document.querySelectorAll('.pal-avatar[data-pal]').forEach(a=>a.innerHTML=palAvatar(a.dataset.pal));
+
+/* ============ 玩家管理：数据驱动渲染（演示数据结构，供开发对接） ============ */
+const players=[
+  {name:'Aki',sid:'7656119 8123 4567',lv:42,xyz:'(-312, 88, 204)',state:'游玩中',st:'ok'},
+  {name:'Yuki',sid:'7656119 8234 5678',lv:38,xyz:'(120, 40, -88)',state:'建造中',st:'ok'},
+  {name:'Rin',sid:'7656119 8345 6789',lv:51,xyz:'(44, 12, 310)',state:'战斗',st:'ok'},
+  {name:'Bot_Tom',sid:'7656119 8456 7890',lv:7,xyz:'(0, 0, 0)',state:'疑似挂机',st:'off'},
+  {name:'SpammerX',sid:'7656119 8567 8901',lv:3,xyz:'未知',state:'已封禁',st:'block'}
+];
+const pTbody=document.getElementById('playerTbody');
+players.forEach(p=>{
+  const tr=document.createElement('tr');
+  tr.innerHTML=`<td><b>${p.name}</b></td><td class="mono t12">${p.sid}</td><td>${p.lv}</td><td class="mono t12">${p.xyz}</td>
+    <td><span class="status-pill ${p.st}"><span class="s-dot"></span>${p.state}</span></td>
+    <td><div class="row-actions">
+      <button class="btn btn-ghost btn-sm" onclick="toast('info','已发送私聊给 ${p.name}')">私聊</button>
+      <button class="btn btn-danger-ghost btn-sm" onclick="confirmKick('${p.name}')">踢出</button>
+      <button class="btn btn-danger-ghost btn-sm" onclick="confirmBan('${p.name}')">封禁</button>
+    </div></td>`;
+  pTbody.appendChild(tr);
+});
+
+/* 概览页：在线玩家速览（真实玩家数据 + 装饰性宠物图标） */
+const ov=document.getElementById('ovPlayers');
+players.slice(0,4).forEach(p=>{
+  const row=document.createElement('div');row.className='companion';
+  row.innerHTML=`<span class="player-ava">${p.name[0]}</span><div class="c-info"><span class="c-name">${p.name}</span><span class="c-state">Lv.${p.lv} · ${p.xyz}</span></div><span class="status-pill ${p.st}"><span class="s-dot"></span>${p.state}</span>`;
+  ov.appendChild(row);
+});
+const ovMore=document.createElement('button');ovMore.className='btn btn-ghost btn-sm';ovMore.style.alignSelf='flex-start';ovMore.style.marginTop='4px';ovMore.textContent='查看全部玩家 →';ovMore.onclick=()=>goNav('players');ov.appendChild(ovMore);
+
+/* ============ RCON 终端 ============ */
+const termBody=document.getElementById('termBody');
+function termCmd(cmd){
+  if(!cmd||!cmd.trim())return;
+  const el=document.createElement('div');el.className='log-cmd';el.textContent='> '+cmd;
+  termBody.appendChild(el);
+  const resp=document.createElement('div');resp.className='log-resp';
+  resp.textContent='[响应] 命令已执行：'+cmd;
+  termBody.appendChild(resp);
+  termBody.scrollTop=termBody.scrollHeight;
+  document.getElementById('cmdInput').value='';
+}
+
+/* ============ 配置组（含「帕鲁」分类，呼应 SRS 的帕鲁参数组） ============ */
+const cfgTabs=[
+  {id:'base',label:'基础'},{id:'world',label:'世界规则'},{id:'pvp',label:'PvP'},
+  {id:'player',label:'玩家'},{id:'pal',label:'帕鲁'},{id:'build',label:'建筑'},
+  {id:'server',label:'服务器'},{id:'net',label:'网络'},{id:'rcon',label:'RCON'}
+];
+const cfgData={
+  base:[{n:'服务器名称',v:'My Palworld',t:'text'},{n:'服务器描述',v:'和朋友一起冒险',t:'text'},{n:'服务器密码',v:'（空）',t:'text'},{n:'最大玩家数',v:'32',t:'num'}],
+  world:[{n:'白天时长(秒)',v:'72000',t:'num'},{n:'夜晚时长(秒)',v:'30000',t:'num'},{n:'经验倍率',v:'1.0',t:'num'},{n:'采集倍率',v:'1.5',t:'num'}],
+  player:[{n:'玩家初始等级',v:'1',t:'num'},{n:'死亡掉落',v:'开启',t:'toggle-on'},{n:'公会人数上限',v:'5',t:'num'},{n:'玩家伤害倍率',v:'1.0',t:'num'}],
+  pal:[{n:'帕鲁初始等级',v:'1',t:'num'},{n:'帕鲁伤害倍率',v:'1.0',t:'num'},{n:'帕鲁采集倍率',v:'1.5',t:'num'},{n:'允许捕获 BOSS',v:'关闭',t:'toggle-off'}],
+  build:[{n:'建造无敌',v:'关闭',t:'toggle-off'},{n:'建筑伤害',v:'开启',t:'toggle-on'},{n:'最大基地数',v:'128',t:'num'},{n:'基地范围',v:'320',t:'num'}],
+  server:[{n:'自动保存间隔(分)',v:'10',t:'num'},{n:'重启预告(秒)',v:'60',t:'num'},{n:'PVP 区域',v:'关闭',t:'toggle-off'},{n:'服务器区域',v:'Asia',t:'text'}],
+  net:[{n:'游戏端口',v:'8211',t:'num'},{n:'RCON 端口',v:'25575',t:'num'},{n:'RCON 启用',v:'开启',t:'toggle-on'},{n:'公网暴露',v:'关闭',t:'toggle-off'}],
+  rcon:[{n:'RCON 密码',v:'••••••',t:'text'},{n:'最大连接数',v:'4',t:'num'},{n:'命令冷却(秒)',v:'1',t:'num'},{n:'白名单',v:'开启',t:'toggle-on'}]
+};
+const cfgTabsEl=document.getElementById('cfgTabs');
+cfgTabs.forEach((t,i)=>{
+  const s=document.createElement('span');s.className='cfg-tab'+(i===0?' active':'');s.textContent=t.label;
+  s.onclick=()=>{document.querySelectorAll('#cfgTabs .cfg-tab').forEach(x=>x.classList.remove('active'));s.classList.add('active');renderCfg(t.id);};
+  cfgTabsEl.appendChild(s);
+});
+function renderCfg(id){
+  const g=document.getElementById('cfgGroups');g.innerHTML='';
+  const items=cfgData[id]||[];
+  const card=document.createElement('div');card.className='cfg-group';
+  let body='';
+  items.forEach(it=>{
+    let ctrl='';
+    if(it.t==='toggle-on')ctrl=`<div class="toggle on" onclick="markDirty(this)"></div>`;
+    else if(it.t==='toggle-off')ctrl=`<div class="toggle" onclick="markDirty(this)"></div>`;
+    else if(it.t==='num')ctrl=`<div class="cfg-value" contenteditable="true" oninput="markDirty(this)">${it.v}</div>`;
+    else ctrl=`<div class="cfg-value" contenteditable="true" oninput="markDirty(this)">${it.v}</div>`;
+    body+=`<div class="cfg-item"><div class="row"><span class="label"><span class="name">${it.n}</span></span>${ctrl}</div></div>`;
+  });
+  card.innerHTML=`<div class="cfg-group-head"><span class="g-title">${cfgTabs.find(t=>t.id===id).label} 设置</span><span class="g-count">${items.length} 项</span><span class="chevron">▾</span></div><div class="cfg-group-body">${body}</div>`;
+  card.querySelector('.cfg-group-head').onclick=()=>card.classList.toggle('collapsed');
+  g.appendChild(card);
+}
+function markDirty(el){el.closest('.cfg-item').classList.add('dirty');}
+renderCfg('base');
+function applyConfig(){toast('success','配置已应用并自动备份 #043');}
+
+/* ============ 实时日志 ============ */
+const logs=[
+  {lv:'info',t:'[12:01:04] 玩家 Aki 加入服务器'},
+  {lv:'info',t:'[12:00:58] 自动保存完成 (world.sav 4.2MB)'},
+  {lv:'warn',t:'[11:58:30] 内存占用 62%，建议检查基地数量'},
+  {lv:'info',t:'[11:55:12] RCON 连接来自 100.64.12.7'},
+  {lv:'error',t:'[11:51:40] 玩家 SpammerX 尝试越权命令，已拒绝'},
+  {lv:'info',t:'[11:50:02] 🐾 新捕获：冰绒兽 (Ice)</)'},
+  {lv:'warn',t:'[11:44:18] 网络抖动，重连成功'},
+  {lv:'info',t:'[11:40:00] 定时备份任务启动'}
+];
+const logBody=document.getElementById('logBody');
+function renderLogs(filter){
+  logBody.innerHTML='';
+  logs.filter(l=>filter==='all'||l.lv===filter).forEach(l=>{
+    const d=document.createElement('div');
+    d.className=l.lv==='error'?'log-err':l.lv==='warn'?'log-info':'log-info';
+    d.textContent=l.t;logBody.appendChild(d);
+  });
+}
+renderLogs('all');
+function filterLogs(el,kind){
+  document.querySelectorAll('.screen[data-page="logs"] .cfg-tab').forEach(x=>x.classList.remove('active'));
+  el.classList.add('active');renderLogs(kind);
+}
+
+/* ============ 配置备份 ============ */
+const backups=[
+  {n:'backup_2026-07-21_1200.ini',t:'今天 12:00',s:'4.2 MB',src:'自动'},
+  {n:'backup_2026-07-21_1100.ini',t:'今天 11:00',s:'4.1 MB',src:'自动'},
+  {n:'backup_2026-07-20_2100.ini',t:'昨天 21:00',s:'4.0 MB',src:'手动'},
+  {n:'backup_2026-07-20_1800.ini',t:'昨天 18:00',s:'3.9 MB',src:'自动'}
+];
+const bTbody=document.getElementById('backupTbody');
+backups.forEach(b=>{
+  const tr=document.createElement('tr');
+  tr.innerHTML=`<td><b>${b.n}</b></td><td class="muted t13">${b.t}</td><td class="mono t13">${b.s}</td><td><span class="chip neutral">${b.src}</span></td>
+    <td><div class="row-actions">
+      <button class="btn btn-ghost btn-sm" onclick="toast('info','已对比 ${b.n}')">对比</button>
+      <button class="btn btn-primary btn-sm" onclick="toast('success','已还原 ${b.n}')">还原</button>
+      <button class="btn btn-danger-ghost btn-sm" onclick="confirmDelete('${b.n}')">删除</button>
+    </div></td>`;
+  bTbody.appendChild(tr);
+});
+function createBackup(){toast('success','已创建备份 #044');}
+
+/* ============ Toast ============ */
+function toast(type,msg){
+  const host=document.getElementById('toastHost');
+  const t=document.createElement('div');t.className='toast '+type+' toast-enter';
+  const ico=type==='success'?'✓':type==='error'?'!':'i';
+  t.innerHTML=`<span class="t-ico" style="color:${type==='success'?'var(--green)':type==='error'?'var(--red)':'var(--blue)'}">${ico}</span><span>${msg}</span>`;
+  host.appendChild(t);
+  setTimeout(()=>{t.style.opacity='0';t.style.transform='translateY(8px)';setTimeout(()=>t.remove(),250);},2600);
+}
+
+/* ============ Modal ============ */
+const mask=document.getElementById('modalMask');
+function openModal(title,text,onOk){
+  document.getElementById('modalTitle').textContent=title;
+  document.getElementById('modalText').textContent=text;
+  document.getElementById('modalOk').onclick=()=>{closeModal();onOk&&onOk();};
+  mask.classList.add('show');
+}
+function closeModal(){mask.classList.remove('show');}
+mask.addEventListener('click',e=>{if(e.target===mask)closeModal();});
+function confirmKick(name){openModal('踢出玩家','确定将玩家 '+name+' 踢出服务器吗？该操作会立即生效。',()=>toast('success','已踢出 '+name));}
+function confirmBan(name){openModal('封禁玩家','确定封禁 '+name+'？被封禁的 SteamID 将无法再次加入。',()=>toast('error','已封禁 '+name));}
+function confirmDelete(name){openModal('删除备份','确定删除备份 '+name+'？此操作不可撤销。',()=>toast('info','已删除 '+name));}
+
+/* ============ Tooltip ============ */
+const tip=document.getElementById('tooltip');
+document.addEventListener('mouseover',e=>{
+  const el=e.target.closest('[data-tip]');
+  if(el){tip.innerHTML=el.dataset.tip.replace('⚠️','');tip.style.display='block';
+    const r=el.getBoundingClientRect();
+    tip.style.left=Math.min(r.left,window.innerWidth-300)+'px';tip.style.top=(r.bottom+8)+'px';}
+});
+document.addEventListener('mouseout',e=>{if(e.target.closest('[data-tip]'))tip.style.display='none';});
+</script>
+</body>
+</html>

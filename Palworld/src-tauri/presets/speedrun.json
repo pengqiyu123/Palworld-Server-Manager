@@ -1,0 +1,9 @@
+[
+  {"name": "PalCaptureRate", "value": "2.000000", "description": "帕鲁捕获率（速通翻倍）"},
+  {"name": "PalSpawnNumRate", "value": "2.000000", "description": "帕鲁出现率（更多帕鲁可选）"},
+  {"name": "ExpRate", "value": "2.000000", "description": "经验值倍率（快速升级）"},
+  {"name": "PalEggDefaultHatchingTime", "value": "0.500000", "description": "帕鲁蛋孵化时间（缩短一半）"},
+  {"name": "DayTimeSpeedRate", "value": "0.500000", "description": "白天时间速率（缩短白天）"},
+  {"name": "NightTimeSpeedRate", "value": "0.500000", "description": "夜间时间速率（缩短夜晚）"},
+  {"name": "PlayerStaminaDecreaceRate", "value": "0.500000", "description": "玩家耐力消耗率（减少疲劳）"}
+]

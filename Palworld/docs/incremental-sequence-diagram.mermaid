@@ -1,0 +1,176 @@
+%% 帕鲁服务器管理器 · 增量设计时序图
+%% 架构师 高见远 · 2026-07-22
+%% 覆盖：启动检测 → 双模式判定 → 起服 → 轮询 → 玩家管理 → 优雅关服
+
+sequenceDiagram
+    actor U as 用户
+    participant App as App.vue
+    participant SetS as SettingsStore
+    participant SS as ServerStore
+    participant UIS as UiStore
+    participant RP as RestProxy(Rust)
+    participant SRV as Server(Rust)
+    participant STEAM as SteamDetect(Rust)
+    participant REST as PalServer REST:8212
+
+    Note over App,REST: ═══ ① App 启动 → 双模式判定 ═══
+
+    App->>SetS: initDetectSettings()
+    SetS->>SetS: load() → 读 settings.json
+    alt server_path 为空
+        SetS->>STEAM: api.steam.detect()
+        STEAM->>STEAM: 读注册表 + VDF 探测
+        STEAM-->>SetS: ["E:\\SteamLibrary\\...\\PalServer"]
+        SetS->>SetS: update({server_path}) + save()
+    end
+
+    App->>SS: init() → api.server.init()
+    SS->>SRV: init_server_state()
+    SRV-->>SS: ServerStatus {running, pid, server_path}
+    App->>SS: setupLogListener() + setupStatusChangeListener()
+    App->>SS: configStore.loadDescriptions()
+    App->>SS: networkStore.checkAll()
+
+    alt status.running = true
+        App->>UIS: setMode('dashboard')
+        App->>SS: startPolling()
+        Note over App: 进入仪表盘模式
+    else status.running = false
+        App->>UIS: setMode('wizard')
+        Note over App: 进入向导模式
+    end
+
+    Note over App,REST: ═══ ② 向导模式 → 启动服务器 ═══
+
+    U->>App: 点击「自动探测 PalServer.exe」
+    App->>STEAM: api.steam.detect()
+    STEAM-->>App: ["E:\\SteamLibrary\\...\\PalServer"]
+    App->>UIS: finishDetect(path)
+    Note over App: Step 1 完成 → 解锁 Step 2
+
+    App->>App: networkStore.checkAll() → 显示端口/Radmin 状态
+    Note over App: Step 2: 端口放行态 + Radmin 状态
+
+    U->>App: 点击「启动服务器」
+    App->>SS: start(server_path)
+    SS->>SRV: start_server(path)
+    SRV->>SRV: Command::spawn(PalServer.exe)
+    SRV-->>SS: ServerStatus {running: true, pid: xxx}
+    App->>UIS: setMode('dashboard')
+    App->>SS: startPolling()
+
+    Note over App,REST: ═══ ③ 60s 轮询引擎 ═══
+
+    SS->>SS: pollOnce() (立即执行第一次)
+    par 并行请求
+        SS->>RP: rest_get_info(server_path)
+        RP->>RP: 读 ini → 提取 AdminPassword + RESTAPIPort
+        RP->>REST: GET /v1/api/info (Basic Auth admin:pwd)
+        REST-->>RP: {version, servername, description, worldguid}
+        RP-->>SS: ServerInfo
+    and
+        SS->>RP: rest_get_metrics(server_path)
+        RP->>REST: GET /v1/api/metrics
+        REST-->>RP: {serverfps, currentplayernum, days, uptime, ...}
+        RP-->>SS: ServerMetrics
+    and
+        SS->>RP: rest_get_players(server_path)
+        RP->>REST: GET /v1/api/players
+        REST-->>RP: {players: [{name, userId, level, ping, ...}]}
+        RP-->>SS: PlayerInfo[]
+    end
+    Note over App: 仪表盘显示 服名/FPS/在线人数/玩家表
+
+    loop 每 60 秒
+        SS->>SS: pollOnce() → Promise.all([getInfo, getMetrics, getPlayers])
+        Note over App: UI 响应式自动刷新
+    end
+
+    Note over App,REST: ═══ ④ 玩家管理（PlayersView）═══
+
+    U->>App: 进入「玩家管理」页 → 看到在线玩家表
+    Note over App: players 来自轮询的 rest_get_players
+
+    U->>App: 点击玩家行「踢人」
+    App->>App: ConfirmDialog 弹窗「确认踢出 玩家昵称?」
+    U->>App: 确认
+    App->>SS: kickPlayer(userid)
+    SS->>RP: rest_kick_player(server_path, userid)
+    RP->>RP: 读 ini → AdminPassword
+    RP->>REST: POST /v1/api/kick {"userid":"steam_xxx"}
+    REST-->>RP: 200 OK
+    RP-->>SS: ()
+    Note over App: toast 成功 → 下次轮询玩家列表刷新
+
+    U->>App: 输入广播消息 → 点击「发送」
+    App->>SS: announce(message)
+    SS->>RP: rest_announce(server_path, message)
+    RP->>REST: POST /v1/api/announce {"message":"..."}
+    REST-->>RP: 200 OK
+    Note over App: toast「广播已发送」
+
+    Note over App,REST: ═══ ⑤ 优雅关服 ═══
+
+    U->>App: 仪表盘点击「优雅关服」
+    App->>App: ConfirmDialog 弹窗「确认关闭服务器? 将在 30 秒后关闭」
+    U->>App: 确认
+    App->>SS: gracefulShutdown(30, "服务器即将关闭")
+    SS->>RP: rest_shutdown(server_path, 30, message)
+    RP->>REST: POST /v1/api/shutdown {"waittime":30, "message":"..."}
+    REST-->>RP: 200 OK
+    RP-->>SS: ()
+    Note over App: UI 显示「服务器正在关闭... (30s)」
+
+    Note over SS: REST /shutdown 是异步的 — 服务器倒计时后自行退出
+
+    SRV->>SS: server-status-change {running: false}
+    Note over SS: stdout 线程检测到进程退出 → emit 事件
+    SS->>SS: stopPolling()
+    App->>UIS: setMode('wizard')
+    Note over App: 切回向导模式
+
+    Note over App,REST: ═══ ⑤b 优雅关服失败 → 兜底 force kill ═══
+
+    alt REST 不可用 (catch)
+        App->>SS: forceStop()
+        SS->>SRV: stop_server()
+        SRV->>SRV: RCON Shutdown 尝试 (P0 未连 RCON, 跳过)
+        SRV->>SRV: sleep(3s) → child.kill()
+        SRV-->>SS: ServerStatus {running: false}
+        SS->>SS: stopPolling()
+        App->>UIS: setMode('wizard')
+    end
+
+    Note over App,REST: ═══ ⑥ 配置真实读写（ConfigView）═══
+
+    U->>App: 进入「配置」页
+    App->>SetS: computeConfigPath(server_path)
+    SetS-->>App: "{path}/Pal/Saved/Config/WindowsServer/PalWorldSettings.ini"
+    App->>App: configStore.load(configPath)
+    Note over App: configStore.read_config → 返回 HashMap → 渲染分组配置项
+
+    U->>App: 修改配置项（如 ServerPlayerMaxNum 16→32）
+    App->>App: configStore.update(key, value) → dirty 标记
+
+    U->>App: 点击「保存配置」
+    alt 服务器运行中
+        App->>App: 弹停服警告「运行中改配置需重启生效」
+        U->>App: 选择「停服→改→重启」或「仅保存」
+    end
+    App->>App: configStore.save() → api.config.write(path, config)
+    Note over App: Rust 侧自动备份旧配置 → 写入新配置
+
+    Note over App,REST: ═══ ⑦ 网络检测 + 异地联机引导（NetworkView）═══
+
+    U->>App: 进入「网络」页
+    App->>App: networkStore.checkAll()
+    Note over App: firewall.check → 3 张 PortCard 显示放行态
+    Note over App: radmin.check → Radmin 状态卡显示虚拟 IP
+
+    U->>App: 点击 PortCard「一键放行」(UDP 8211 未放行)
+    App->>App: networkStore.addFirewallRules()
+    App->>App: networkStore.checkFirewall() → 刷新状态徽标
+
+    U->>App: 点击「一键复制连法」
+    App->>App: clipboard.writeText("朋友连我帕鲁服：①装 Radmin VPN...")
+    Note over App: toast「连法已复制到剪贴板」

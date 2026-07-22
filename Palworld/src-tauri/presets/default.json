@@ -1,0 +1,12 @@
+[
+  {"name": "Difficulty", "value": "None", "description": "游戏难度"},
+  {"name": "DayTimeSpeedRate", "value": "1.000000", "description": "白天时间速率"},
+  {"name": "ExpRate", "value": "1.000000", "description": "经验值倍率"},
+  {"name": "PalCaptureRate", "value": "1.000000", "description": "帕鲁捕获率"},
+  {"name": "ServerPlayerMaxNum", "value": "32", "description": "服务器最大玩家数"},
+  {"name": "PublicPort", "value": "8211", "description": "服务器公共端口"},
+  {"name": "RCONEnabled", "value": "False", "description": "启用 RCON 远程管理"},
+  {"name": "RCONPort", "value": "25575", "description": "RCON 端口"},
+  {"name": "ServerName", "value": "\"Default Palworld Server\"", "description": "服务器名称"},
+  {"name": "AdminPassword", "value": "\"\"", "description": "管理员密码"}
+]

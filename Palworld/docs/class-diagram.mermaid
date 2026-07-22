@@ -1,0 +1,50 @@
+classDiagram
+    class UiStore {
+        +TooltipState tooltip
+        +WizardState wizard
+        +setTooltip(v, html, x, y)
+        +hideTooltip()
+        +startDetect()
+        +finishDetect(path)
+        +setManual(path)
+    }
+    class TooltipState { +boolean visible; +string html; +number x; +number y }
+    class WizardState { +number step; +boolean detected; +string detectedPath; +boolean detecting; +boolean manual }
+
+    class Tooltip { <<Teleport body>> 读 UiStore.tooltip }
+    class InfoTip { +string html; onEnter(); onLeave() }
+    class TitleBar { minimize(); toggleMaximize(); close() }
+    class AppIcon { +string name }
+
+    class Sidebar { 状态卡读 UiStore.wizard; navItems[] }
+    class AppShell { slot sidebar; slot default(router-view) }
+    class OverviewView { onDetect() mock setTimeout; onManual() }
+    class StepCard { +number num; +string title; +string desc; +state }
+    class PlaceholderView { +string title; +string desc; +string iconName }
+
+    class ConfigView { +string search; +CfgGroup[] groups; onSave() mock }
+    class CfgGroup { +string title; +string iconName; +number count; +boolean collapsed; toggle() }
+    class CfgItem { +string name; +editable; +modelValue; +min? max? step?; +options?; +tipHtml?; onCommit(v) }
+
+    class NetworkView { +PortCard[] ports; +vpn }
+    class PortCard { +string title; +string proto; +string desc; +status; +iconName }
+    class StatusPill { +status; +string text }
+
+    class RconView { +boolean connected; +RconLogLine[] lines; +history[]; send(cmd) mock; connect() }
+    class Terminal { +RconLogLine[] lines }
+    class RconLogLine { +kind; +string text }
+
+    UiStore *-- TooltipState
+    UiStore *-- WizardState
+    Tooltip ..> UiStore : reads
+    InfoTip ..> UiStore : writes
+    OverviewView ..> UiStore : drives wizard
+    Sidebar ..> UiStore : reads wizard
+    AppShell o-- Sidebar
+    AppShell o-- "router-view"
+    ConfigView o-- CfgGroup
+    CfgGroup o-- CfgItem
+    NetworkView o-- PortCard
+    PortCard o-- StatusPill
+    RconView o-- Terminal
+    Terminal o-- RconLogLine

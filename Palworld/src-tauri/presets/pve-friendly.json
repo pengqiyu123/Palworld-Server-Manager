@@ -1,0 +1,10 @@
+[
+  {"name": "Difficulty", "value": "None", "description": "游戏难度（None 关闭难度）"},
+  {"name": "PlayerDamageRateAttack", "value": "0.500000", "description": "玩家攻击伤害倍率（降低互相伤害）"},
+  {"name": "PlayerDamageRateDefense", "value": "0.500000", "description": "对玩家的防御伤害倍率（降低受伤）"},
+  {"name": "PalSpawnNumRate", "value": "1.500000", "description": "帕鲁出现率（更多帕鲁）"},
+  {"name": "PalCaptureRate", "value": "1.500000", "description": "帕鲁捕获率（更易捕获）"},
+  {"name": "ExpRate", "value": "1.500000", "description": "经验值倍率（更快升级）"},
+  {"name": "bEnablePlayerToPlayerDamage", "value": "False", "description": "禁用玩家间伤害"},
+  {"name": "DeathPenalty", "value": "None", "description": "死亡惩罚（None 无惩罚）"}
+]

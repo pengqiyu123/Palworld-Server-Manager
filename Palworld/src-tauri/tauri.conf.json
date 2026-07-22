@@ -1,0 +1,23 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/schema.json",
+  "productName": "Palworld Server Manager",
+  "version": "1.0.0",
+  "identifier": "com.palworld.server-manager",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5222"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:5222; script-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:5222; style-src 'self' 'unsafe-inline' http://localhost:5222; img-src 'self' data: http://localhost:5222; connect-src 'self' http://localhost:5222 ws://localhost:5222;",
+      "capabilities": ["default"]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"]
+  }
+}

@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Preflight</title>
+    <style id="theme-vars">
+:root {
+  --palwarm-background: #f5ede2;
+  --palwarm-foreground: #3f322c;
+  --palwarm-card: rgba(255, 252, 247, 0.72);
+  --palwarm-card-foreground: #3f322c;
+  --palwarm-popover: rgba(255, 250, 244, 0.92);
+  --palwarm-popover-foreground: #3f322c;
+  --palwarm-primary: #e66f51;
+  --palwarm-primary-foreground: #ffffff;
+  --palwarm-muted: rgba(255, 255, 255, 0.48);
+  --palwarm-muted-foreground: #77675f;
+  --palwarm-border: rgba(116, 88, 72, 0.14);
+  --palwarm-input: rgba(255, 255, 255, 0.62);
+  --palwarm-ring: rgba(230, 111, 81, 0.28);
+  --palwarm-radius-sm: 12px;
+  --palwarm-radius-md: 18px;
+  --palwarm-radius-lg: 26px;
+  --palwarm-state-success: #4f8a6b;
+  --palwarm-state-warning: #b8782f;
+  --palwarm-state-error: #c9554d;
+  --palwarm-state-info: #4b7896;
+  --palwarm-font-sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+  --palwarm-font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+html, body {
+  font-family: var(--palwarm-font-sans);
+  color: var(--palwarm-foreground);
+  background: var(--palwarm-background);
+}
+
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.1/dist/index.global.js"></script>
+    <script src="https://unpkg.com/lucide@1.8.0/dist/umd/lucide.min.js"></script>
+    <style type="text/tailwindcss">
+  @theme inline {
+    --color-background: var(--palwarm-background);
+    --color-foreground: var(--palwarm-foreground);
+    --color-card: var(--palwarm-card);
+    --color-card-foreground: var(--palwarm-card-foreground);
+    --color-popover: var(--palwarm-popover);
+    --color-popover-foreground: var(--palwarm-popover-foreground);
+    --color-primary: var(--palwarm-primary);
+    --color-primary-foreground: var(--palwarm-primary-foreground);
+    --color-muted: var(--palwarm-muted);
+    --color-muted-foreground: var(--palwarm-muted-foreground);
+    --color-border: var(--palwarm-border);
+    --color-input: var(--palwarm-input);
+    --color-ring: var(--palwarm-ring);
+    --radius-sm: var(--palwarm-radius-sm);
+    --radius-md: var(--palwarm-radius-md);
+    --radius-lg: var(--palwarm-radius-lg);
+  }
+  @layer base {
+    body { background: var(--palwarm-background); color: var(--palwarm-foreground); }
+    td, th { @apply break-words; word-break: break-all; word-break: auto-phrase; }
+    th { @apply whitespace-nowrap; }
+  }
+    </style>
+    <style id="semantic-token-fallback">
+      .bg-background { background-color: var(--palwarm-background); }
+      .text-background { color: var(--palwarm-background); }
+      .border-background { border-color: var(--palwarm-background); }
+      .ring-background { --tw-ring-color: var(--palwarm-background); }
+      .bg-foreground { background-color: var(--palwarm-foreground); }
+      .text-foreground { color: var(--palwarm-foreground); }
+      .border-foreground { border-color: var(--palwarm-foreground); }
+      .ring-foreground { --tw-ring-color: var(--palwarm-foreground); }
+      .bg-card { background-color: var(--palwarm-card); }
+      .text-card { color: var(--palwarm-card); }
+      .border-card { border-color: var(--palwarm-card); }
+      .ring-card { --tw-ring-color: var(--palwarm-card); }
+      .bg-card-foreground { background-color: var(--palwarm-card-foreground); }
+      .text-card-foreground { color: var(--palwarm-card-foreground); }
+      .border-card-foreground { border-color: var(--palwarm-card-foreground); }
+      .ring-card-foreground { --tw-ring-color: var(--palwarm-card-foreground); }
+      .bg-popover { background-color: var(--palwarm-popover); }
+      .text-popover { color: var(--palwarm-popover); }
+      .border-popover { border-color: var(--palwarm-popover); }
+      .ring-popover { --tw-ring-color: var(--palwarm-popover); }
+      .bg-popover-foreground { background-color: var(--palwarm-popover-foreground); }
+      .text-popover-foreground { color: var(--palwarm-popover-foreground); }
+      .border-popover-foreground { border-color: var(--palwarm-popover-foreground); }
+      .ring-popover-foreground { --tw-ring-color: var(--palwarm-popover-foreground); }
+      .bg-primary { background-color: var(--palwarm-primary); }
+      .text-primary { color: var(--palwarm-primary); }
+      .border-primary { border-color: var(--palwarm-primary); }
+      .ring-primary { --tw-ring-color: var(--palwarm-primary); }
+      .bg-primary-foreground { background-color: var(--palwarm-primary-foreground); }
+      .text-primary-foreground { color: var(--palwarm-primary-foreground); }
+      .border-primary-foreground { border-color: var(--palwarm-primary-foreground); }
+      .ring-primary-foreground { --tw-ring-color: var(--palwarm-primary-foreground); }
+      .bg-muted { background-color: var(--palwarm-muted); }
+      .text-muted { color: var(--palwarm-muted); }
+      .border-muted { border-color: var(--palwarm-muted); }
+      .ring-muted { --tw-ring-color: var(--palwarm-muted); }
+      .bg-muted-foreground { background-color: var(--palwarm-muted-foreground); }
+      .text-muted-foreground { color: var(--palwarm-muted-foreground); }
+      .border-muted-foreground { border-color: var(--palwarm-muted-foreground); }
+      .ring-muted-foreground { --tw-ring-color: var(--palwarm-muted-foreground); }
+      .bg-border { background-color: var(--palwarm-border); }
+      .text-border { color: var(--palwarm-border); }
+      .border-border { border-color: var(--palwarm-border); }
+      .ring-border { --tw-ring-color: var(--palwarm-border); }
+      .bg-input { background-color: var(--palwarm-input); }
+      .text-input { color: var(--palwarm-input); }
+      .border-input { border-color: var(--palwarm-input); }
+      .ring-input { --tw-ring-color: var(--palwarm-input); }
+      .bg-ring { background-color: var(--palwarm-ring); }
+      .text-ring { color: var(--palwarm-ring); }
+      .border-ring { border-color: var(--palwarm-ring); }
+      .ring-ring { --tw-ring-color: var(--palwarm-ring); }
+    </style>
+    <style>
+      .no-scrollbar::-webkit-scrollbar { display: none; }
+      .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+      [data-icon] {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        -webkit-mask-size: contain;
+        mask-size: contain;
+        -webkit-mask-repeat: no-repeat;
+        mask-repeat: no-repeat;
+        -webkit-mask-position: center;
+        mask-position: center;
+        background-color: currentColor;
+      }
+    </style>
+</head>
+<body class="min-h-screen font-sans antialiased">
+    <main>
+    </main>
+    <script>lucide.createIcons();</script>
+</body>
+</html>

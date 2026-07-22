@@ -1,0 +1,88 @@
+sequenceDiagram
+    actor U as 老板
+    participant App as App.vue
+    participant OS as OnboardingStore
+    participant NS as NetworkStore
+    participant SS as ServerStore
+    participant Net as network.rs
+    participant Srv as server.rs
+    participant Rcon as rcon.rs(0.6 crate)
+    participant PS as PowerShell
+    participant Cmd as PalServer-Win64-Shipping-Cmd.exe
+    participant REST as REST:8212
+    actor F as 朋友
+
+    Note over U,F: 【S1-S4】前置检查（复用 R2）
+    U->>App: 打开 App
+    App->>OS: 派生 s1..s4
+    OS->>SS: settings.server_path? config.RCON/REST/AdminPassword? status.running? firewall.check()
+    Note over OS: s1..s4 全 pass 则继续
+
+    Note over U,F: 【S5】Radmin 5 档检测
+    U->>App: 点击「检测 Radmin」
+    App->>NS: checkReadiness(server_path)
+    NS->>Net: check_radmin_readiness()
+    Net->>PS: Get-NetAdapter -Description *Radmin*
+    PS-->>Net: name=Radmin VPN, status=Up
+    alt 空 → L0
+        Net-->>NS: {level:L0, next_action:open_url}
+    else Status ∈ {Disabled,Disconnected} → L1
+        Net-->>NS: {level:L1, next_action:launch_app}
+    else Status=Up
+        Net->>PS: Get-NetIPAddress -Alias 'Radmin VPN'
+        PS-->>Net: 25.x.x.x (或空)
+        alt IP 空 or 非 25.段 → L2
+            Net-->>NS: {level:L2, next_action:show_guide}
+        else 拿到 25.x.x.x
+            Net->>Srv: get_server_status()
+            Net->>Net: firewall.check_firewall_rules()
+            alt process=false or 8211 未放行 → L3
+                Net-->>NS: {level:L3, reason:...}
+            else
+                Net->>Net: UdpSocket::bind(25.x.x.x:8211)
+                alt AddrInUse(10048) → L4 ✅
+                    Net-->>NS: {level:L4, virtual_ip, next_action:copy_card}
+                else Ok(_) → L3
+                    Net-->>NS: {level:L3, reason:"8211 未监听"}
+                else other Err → L3
+                    Net-->>NS: {level:L3, reason:err}
+                end
+            end
+        end
+    end
+    NS-->>OS: readiness → s5 派生
+
+    Note over U,F: 【S6-S7】生成连法卡 + 朋友连入
+    OS->>App: s6 pass（S1-S5 全绿）
+    U->>App: 点击「一键复制连法」
+    App->>App: writeText("朋友连我: 25.x.x.x:8211")
+    U->>F: 微信/QQ 发出
+
+    Note over U,F: 【日志流】spawn Cmd 版
+    U->>App: 启动服务器
+    App->>SS: start(path)
+    SS->>Srv: start_server(path)
+    Srv->>Srv: resolve_exe_path → Pal/Binaries/Win64/...Cmd.exe
+    Srv->>Cmd: spawn(cmd_exe, stdout=piped)
+    Srv->>App: emit server-log-source="cmd"
+    loop stdout 每一行
+        Cmd->>Srv: [LOG] 煜 connected
+        Srv->>App: emit server-log(line)
+        App->>SS: logs append (500 环形)
+    end
+
+    Note over U,F: 【朋友进服】S7 达成 → 项目完结
+    F->>Cmd: 游戏内填 25.x.x.x:8211 → connect
+    Cmd->>Srv: [LOG] friend joined
+    SS->>REST: GET /v1/api/players (Basic Auth)
+    REST-->>SS: [{name:"煜"}, {name:"friend"}]
+    SS->>OS: players.length=2 → s7 首次 pass
+    OS->>App: onSuccess() 一次性触发
+    App->>U: 🎉 联机成功 + 归档 finale-status.md
+
+    Note over U,F: 【RCON 备份控制】D3 新库
+    U->>App: RconView 点「ShowPlayers」
+    App->>Rcon: rcon_send_command("ShowPlayers")
+    Rcon->>Rcon: connection.cmd("ShowPlayers").await
+    Rcon-->>App: name,playeruid,steamid\n煜,...\nfriend,...
+    App->>U: 表格渲染

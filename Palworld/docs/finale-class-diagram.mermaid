@@ -1,0 +1,102 @@
+classDiagram
+    class ReadinessLevel {
+        <<enum>>
+        L0
+        L1
+        L2
+        L3
+        L4
+    }
+
+    class RadminReadiness {
+        +ReadinessLevel level
+        +String virtual_ip
+        +String adapter_status
+        +Option~String~ reason
+        +Option~NextAction~ next_action
+    }
+
+    class NextAction {
+        +String action_type
+        +String label
+        +Option~String~ payload
+    }
+
+    class NetworkModule {
+        <<Rust: network.rs>>
+        +check_radmin_readiness(server_path) RadminReadiness
+        +check_radmin_lan_status() RadminLanStatus  [deprecated]
+        -detect_adapter() (name, status)
+        -detect_virtual_ip(alias) String
+        -probe_udp_bind_8211(ip) Result~(), io::Error~
+    }
+
+    class RconClient {
+        <<Rust: rcon.rs 改写>>
+        -Option~rcon::Connection~ connection
+        +connect(host, port, password)
+        +send_command(cmd) String
+        +disconnect()
+        +is_connected() bool
+    }
+
+    class RconState {
+        +tokio::sync::Mutex~RconClient~ client
+    }
+
+    class ServerModule {
+        <<Rust: server.rs 改写>>
+        +start_server(path) ServerStatus
+        -resolve_exe_path(path) (PathBuf, source_tag)
+        -spawn_stdout_reader(child, logs, app)
+    }
+
+    class RestProxyModule {
+        <<Rust: rest_proxy.rs 微调>>
+        -Lazy~reqwest::Client~ HTTP_CLIENT
+        +rest_get_info/metrics/players/kick/...
+    }
+
+    class NetworkStore {
+        <<TS Pinia>>
+        +FirewallStatus firewall
+        +RadminReadiness readiness
+        +checkReadiness()
+        +checkAll()
+    }
+
+    class OnboardingStore {
+        <<TS Pinia, 新建>>
+        +Record~StepId, OnboardingStepState~ steps
+        +computed s1..s7
+        +onSuccess() event once
+    }
+
+    class RadminReadinessCard {
+        <<Vue 组件, 新建>>
+        +props readiness
+        +emit recheck
+        +emit invokeAction(next_action)
+    }
+
+    class ConnectionCard {
+        <<Vue 组件, 新建>>
+        +props virtual_ip
+        +emit copy()
+    }
+
+    class OnboardingProgress {
+        <<Vue 组件, 新建>>
+        +props steps
+    }
+
+    NetworkModule ..> RadminReadiness : returns
+    RadminReadiness *-- ReadinessLevel
+    RadminReadiness *-- NextAction
+    NetworkStore ..> NetworkModule : invokes
+    OnboardingStore ..> NetworkStore : derives
+    OnboardingStore ..> ServerStore : derives
+    RadminReadinessCard ..> NetworkStore : reads
+    OnboardingProgress ..> OnboardingStore : reads
+    ConnectionCard ..> NetworkStore : reads virtual_ip
+    RconClient --> RconState

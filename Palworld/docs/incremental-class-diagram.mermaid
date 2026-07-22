@@ -1,0 +1,213 @@
+%% 帕鲁服务器管理器 · 增量设计类图
+%% 架构师 高见远 · 2026-07-22
+
+classDiagram
+    class RestProxy {
+        <<Rust module: rest_proxy.rs>>
+        +rest_get_info(server_path: String) Result~ServerInfo, String~
+        +rest_get_metrics(server_path: String) Result~ServerMetrics, String~
+        +rest_get_players(server_path: String) Result~Vec~PlayerInfo~, String~
+        +rest_kick_player(server_path: String, userid: String) Result~(), String~
+        +rest_ban_player(server_path: String, userid: String) Result~(), String~
+        +rest_unban_player(server_path: String, userid: String) Result~(), String~
+        +rest_announce(server_path: String, message: String) Result~(), String~
+        +rest_shutdown(server_path: String, waittime: u32, message: String) Result~(), String~
+        -read_rest_config(server_path: String) Result~(String, u16), String~
+    }
+
+    class ServerInfo {
+        +String version
+        +String servername
+        +String description
+        +String worldguid
+    }
+
+    class ServerMetrics {
+        +u32 currentplayernum
+        +f64 serverfps
+        +f64 serverfpsaverage
+        +f64 serverframetime
+        +u32 days
+        +u32 maxplayernum
+        +u32 basecampnum
+        +u64 uptime
+    }
+
+    class PlayerInfo {
+        +String name
+        +String playerId
+        +String userId
+        +String iP
+        +f64 ping
+        +f64 location_x
+        +f64 location_y
+        +u32 level
+    }
+
+    class ConfigHelper {
+        <<config.rs 新增辅助函数>>
+        +read_config_from_file(path: String) Result~HashMap~String,String~, String~
+        +extract_admin_password(config: HashMap) String
+        +extract_rest_port(config: HashMap) u16
+    }
+
+    class FirewallModule {
+        <<firewall.rs 增强>>
+        +check_firewall_rules() Result~FirewallStatus, String~
+        +add_firewall_rules() Result~String, String~
+    }
+
+    class FirewallStatus {
+        +bool port_8211_open
+        +bool port_27015_open
+        +bool port_25575_open
+        +bool port_8212_open
+    }
+
+    class ServerStore {
+        <<stores/server.ts 改写>>
+        +ServerStatus status
+        +ServerInfo info
+        +ServerMetrics metrics
+        +PlayerInfo[] players
+        +string[] logs
+        +bool loading
+        +init()
+        +start(path: String)
+        +gracefulShutdown(waittime: number, message: String)
+        +forceStop()
+        +refreshStatus()
+        +startPolling()
+        +stopPolling()
+        +pollOnce()
+        +setupLogListener()
+        +setupStatusChangeListener()
+        +clearLogs()
+        +destroyListener()
+    }
+
+    class SettingsStore {
+        <<stores/settings.ts 微调>>
+        +AppSettings settings
+        +load()
+        +save()
+        +update(patch)
+        +computeConfigPath(serverPath: String) String
+        +initDetectSettings()
+    }
+
+    class UiStore {
+        <<stores/ui.ts 微调>>
+        +TooltipState tooltip
+        +WizardState wizard
+        +setTooltip(visible, html, x, y)
+        +hideTooltip()
+        +startDetect()
+        +finishDetect(path: String)
+        +setManual(path: String)
+        +setMode(mode: 'wizard'|'dashboard')
+    }
+
+    class WizardState {
+        +number step
+        +boolean detected
+        +string detectedPath
+        +boolean detecting
+        +boolean manual
+        +string mode
+    }
+
+    class NetworkStore {
+        <<stores/network.ts 微调>>
+        +FirewallStatus firewall
+        +RadminLanStatus radmin
+        +checkFirewall()
+        +addFirewallRules()
+        +checkRadmin()
+        +checkPort(port: number)
+        +checkAll()
+    }
+
+    class ConfigStore {
+        <<stores/config.ts 微调>>
+        +string configPath
+        +Record~string,string~ config
+        +Record~string,string~ originalConfig
+        +ConfigValue[] descriptions
+        +Set~string~ dirty
+        +load(path: String)
+        +save()
+        +update(key: String, value: String)
+        +resetToDefault()
+        +cancelEdits()
+        +loadDescriptions()
+        +applyPreset(name: String)
+    }
+
+    class OverviewView {
+        <<views/OverviewView.vue 改写>>
+        +mode: 'wizard'|'dashboard'
+        +onDetect()
+        +onStart()
+        +onGracefulShutdown()
+        +onForceStop()
+    }
+
+    class PlayersView {
+        <<views/PlayersView.vue 新建>>
+        +PlayerInfo[] players
+        +onKick(userid: String)
+        +onBan(userid: String)
+        +onAnnounce(message: String)
+    }
+
+    class ConfigView {
+        <<views/ConfigView.vue 改写>>
+        +string search
+        +onSave()
+        +onReset()
+        +onSearch()
+        +onItemUpdate(item, value)
+    }
+
+    class NetworkView {
+        <<views/NetworkView.vue 改写>>
+        +FirewallStatus firewall
+        +RadminLanStatus radmin
+        +onAddFirewallRules()
+        +onCopyConnection()
+        +onCheckStep(step)
+    }
+
+    class App {
+        <<App.vue 微调>>
+        +onMounted()
+        +onUnmounted()
+    }
+
+    RestProxy ..> ConfigHelper : reads config
+    RestProxy ..> ServerInfo : returns
+    RestProxy ..> ServerMetrics : returns
+    RestProxy ..> PlayerInfo : returns
+    FirewallModule ..> FirewallStatus : returns
+
+    ServerStore o-- ServerInfo : info
+    ServerStore o-- ServerMetrics : metrics
+    ServerStore o-- PlayerInfo : players
+    UiStore *-- WizardState
+
+    OverviewView ..> ServerStore : reads/writes
+    OverviewView ..> UiStore : reads mode
+    OverviewView ..> SettingsStore : reads server_path
+    PlayersView ..> ServerStore : reads players
+    PlayersView ..> SettingsStore : reads server_path
+    ConfigView ..> ConfigStore : reads/writes
+    ConfigView ..> SettingsStore : reads configPath
+    NetworkView ..> NetworkStore : reads/writes
+
+    ServerStore ..> RestProxy : api.rest.*
+    ServerStore ..> FirewallModule : api.server.*
+    SettingsStore ..> ConfigHelper : computeConfigPath
+    App ..> ServerStore : lifecycle
+    App ..> SettingsStore : bootstrap
+    App ..> UiStore : setMode

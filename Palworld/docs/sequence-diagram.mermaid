@@ -1,0 +1,72 @@
+%% ===== 4.1 首屏向导解锁（S1 自动探测，模拟）=====
+sequenceDiagram
+    actor U as 用户
+    participant O as OverviewView
+    participant S as UiStore
+    participant SB as Sidebar
+    U->>O: 点击「自动探测 PalServer.exe」
+    O->>S: startDetect() (detecting=true)
+    Note over O: setTimeout(1400ms) 模拟，禁 api.steam.detect
+    O->>S: finishDetect("D:\Steam\...\PalServer")
+    S->>SB: wizard.detected=true / detectedPath
+    SB-->>U: 状态卡：已配置·待启动 + 绿点
+    Note over S: step1→locked, step2→active
+
+%% ===== 4.2 导航切换 =====
+sequenceDiagram
+    actor U as 用户
+    participant N as Sidebar nav-item
+    participant R as vue-router
+    participant A as App.vue router-view
+    U->>N: 点击导航
+    N->>R: router.push(path)
+    R->>A: 切换组件 (Transition 淡入)
+    Note over N: active-class 由 route 驱动
+
+%% ===== 4.3 折叠分组 / 搜索过滤（S2）=====
+sequenceDiagram
+    actor U as 用户
+    participant G as CfgGroup
+    participant C as ConfigView
+    U->>G: 点击分组头
+    G->>G: emit toggle() → collapsed 翻转
+    G->>G: body v-show
+    U->>C: 输入搜索
+    C->>C: 展开所有 group + 按 name 过滤
+
+%% ===== 4.4 Tooltip 显隐 =====
+sequenceDiagram
+    actor U as 用户
+    participant I as InfoTip
+    participant S as UiStore
+    participant TT as Tooltip
+    U->>I: mouseenter(ⓘ)
+    I->>I: 计算锚点 rect
+    I->>S: setTooltip(true, html, x, y)
+    S-->>TT: 渲染气泡于(x,y)
+    U->>I: mouseleave
+    I->>S: hideTooltip() (80ms)
+
+%% ===== 4.5 配置项内联编辑 + 保存态（S2，模拟）=====
+sequenceDiagram
+    actor U as 用户
+    participant CI as CfgItem
+    participant V as ConfigView
+    participant T as Toast
+    U->>CI: 点击数值 → 内联 input
+    U->>CI: 输入 + Enter
+    CI->>V: emit update:modelValue → 本地 config + dirty
+    U->>V: 点击「保存配置」
+    V->>T: toast.success("配置已保存（模拟）")
+    Note over V: 不调 api.config.write()
+
+%% ===== 4.6 模拟 RCON 收发（S4）=====
+sequenceDiagram
+    actor U as 用户
+    participant R as RconView
+    participant T as Terminal
+    U->>R: 输入/快捷指令 SaveWorld 回车
+    R->>R: 正则匹配 /^saveworld/i
+    R->>T: appendLog(cmd, 'cmd')
+    R->>T: appendLog("World saved successfully", 'resp')
+    Note over R: 不调 api.rcon.send()
