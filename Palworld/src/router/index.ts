@@ -31,12 +31,6 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '配置' },
   },
   {
-    path: '/network',
-    name: 'network',
-    component: () => import('@/views/NetworkView.vue'),
-    meta: { title: '网络' },
-  },
-  {
     path: '/rcon',
     name: 'rcon',
     component: () => import('@/views/RconView.vue'),
@@ -52,7 +46,13 @@ const routes: RouteRecordRaw[] = [
     path: '/saves',
     name: 'saves',
     component: () => import('@/views/SaveManagementView.vue'),
-    meta: { title: '存档管理' },
+    meta: { title: '本地存档' },
+  },
+  {
+    path: '/migrate',
+    name: 'migrate',
+    component: () => import('@/views/SaveMigrationView.vue'),
+    meta: { title: '数据迁移' },
   },
   {
     path: '/backup',
@@ -104,6 +104,14 @@ router.beforeEach((to, _from, next) => {
     document.title = `${title} - Palworld Server Manager`
   }
   next()
+})
+
+// 路由切换后重置所有 .screen 滚动位置（避免返回时长表单停在奇怪位置）
+router.afterEach(() => {
+  const screens = document.querySelectorAll<HTMLElement>('.screen')
+  screens.forEach((el) => {
+    el.scrollTop = 0
+  })
 })
 
 export default router

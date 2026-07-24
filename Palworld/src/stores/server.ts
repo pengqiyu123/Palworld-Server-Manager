@@ -4,7 +4,6 @@ import { api } from '@/api/tauri'
 import type { ServerStatus, ServerInfo, ServerMetrics, PlayerInfo } from '@/types/tauri'
 import { listen } from '@tauri-apps/api/event'
 import { useSettingsStore } from '@/stores/settings'
-import { useUiStore } from '@/stores/ui'
 
 /**
  * 服务器状态 Store。
@@ -21,6 +20,7 @@ export const useServerStore = defineStore('server', () => {
   const status = ref<ServerStatus>({
     running: false,
     pid: null,
+    managed_by_app: false,
     server_path: '',
     log_count: 0,
   })
@@ -48,10 +48,10 @@ export const useServerStore = defineStore('server', () => {
     return settingsStore.settings.server_path
   }
 
-  async function init() {
+  async function init(path: string) {
     try {
       loading.value = true
-      status.value = await api.server.init()
+      status.value = await api.server.init(path)
       logs.value = await api.server.getLogs()
     } finally {
       loading.value = false
@@ -167,8 +167,13 @@ export const useServerStore = defineStore('server', () => {
 
   /** 强制停止（force kill 兜底） */
   async function forceStop(): Promise<void> {
-    await api.server.stop()
-    stopPolling()
+    loading.value = true
+    try {
+      status.value = await api.server.forceStop()
+      stopPolling()
+    } finally {
+      loading.value = false
+    }
   }
 
   // ==================== 玩家管理动作（供 PlayersView 调用） ====================
@@ -213,16 +218,13 @@ export const useServerStore = defineStore('server', () => {
     if (unlistenStatus) return
     unlistenStatus = await listen<ServerStatus>('server-status-change', (event) => {
       status.value = event.payload
-      // 进程退出 → 自动停止轮询 + 切回向导模式
+      // 进程退出 → 自动停止轮询并清空陈旧的 REST 数据。
       if (!event.payload.running) {
         stopPolling()
         // 清空 REST 数据（避免仪表盘显示过期数据）
         serverInfo.value = null
         serverMetrics.value = null
         players.value = []
-        // 切回向导模式
-        const uiStore = useUiStore()
-        uiStore.setMode('wizard')
       }
     })
   }

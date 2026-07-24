@@ -236,17 +236,28 @@ html, body {
   background: transparent;
   position: relative;
   min-width: 0;
+  min-height: 0;        /* 允许内部滚动 */
   overflow: hidden;
 }
 .screen {
-  position: absolute; inset: 0;
+  position: relative;   /* 不再 absolute，避免滚动盒被绑死在 .main 尺寸 */
+  height: 100%;
+  min-height: 0;        /* 打破 flex 默认 min-height:auto，是弹性滚动关键 */
   display: none;
   flex-direction: column;
   padding: 24px 28px 28px;
   gap: 18px;
-  overflow-y: auto;
+  overflow-y: auto;     /* 滚动层唯一归属 .screen */
 }
 .screen.active { display: flex; }
+/* 全局滚动范式（R1）：.screen 直接子元素保持自然高度，整页滚动而非压扁子元素 */
+.screen > * { flex-shrink: 0; }
+/* 长分区卡片自身也需 min-height:0，避免被父 flex 裁切 */
+.sm-section, .op-grid { min-height: 0; }
+
+/* 未运行指标灰态（Q6）：用设计 token，禁止散写十六进制 */
+.idle { color: var(--text-lo); font-weight: 500; }
+.m-value.idle, .di-value.idle { color: var(--text-lo); font-weight: 500; }
 
 /* 通用页面头部 */
 .page-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
@@ -413,8 +424,9 @@ html, body {
   background: var(--glass-bg);
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
-  overflow: hidden;
 }
+/* 仅折叠态裁切，避免展开内容被裁切（R1） */
+.cfg-group.collapsed { overflow: hidden; }
 .cfg-group-head {
   height: 46px; display: flex; align-items: center; gap: 10px;
   padding: 0 16px; background: rgba(255, 250, 244, 0.55); cursor: pointer;

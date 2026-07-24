@@ -57,15 +57,15 @@ import AppIcon from '@/components/ui/AppIcon.vue'
 const uiStore = useUiStore()
 const serverStore = useServerStore()
 
-// 主导航 7 项（新增玩家管理）
+// 主导航（按开服真实手感排序：概览→配置→玩家管理→RCON→实时日志→本地存档→数据迁移→配置备份）
 const navItems = [
   { path: '/overview', label: '概览', icon: 'overview' },
-  { path: '/players', label: '玩家管理', icon: 'players' },
   { path: '/config', label: '配置', icon: 'config' },
-  { path: '/network', label: '网络', icon: 'network' },
+  { path: '/players', label: '玩家管理', icon: 'players' },
   { path: '/rcon', label: 'RCON 控制台', icon: 'rcon' },
-  { path: '/saves', label: '存档管理', icon: 'save' },
   { path: '/logs', label: '实时日志', icon: 'logs' },
+  { path: '/saves', label: '本地存档', icon: 'save' },
+  { path: '/migrate', label: '数据迁移', icon: 'migration' },
   { path: '/backup', label: '配置备份', icon: 'backup' },
 ]
 

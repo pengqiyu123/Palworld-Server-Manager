@@ -1,30 +1,44 @@
-# AGENTS.md
+# Repository Guidelines
 
-## 项目简介
+## Project Structure & Module Organization
 
-这是一个幻兽帕鲁专用服务器管理器，提供服务器启停、配置编辑、网络与防火墙检查、RCON 控制和故障排查功能，并通过 Tauri 打包为 Windows 桌面应用。
+`Palworld/` contains the production desktop application. Its Vue 3 UI lives in `Palworld/src/`: views belong in `views/`, reusable UI in `components/`, application state in `stores/`, and typed Tauri calls in `api/tauri.ts` with matching definitions in `types/tauri.ts`. The Rust/Tauri backend is under `Palworld/src-tauri/src/`; keep commands grouped by domain such as `server.rs`, `config.rs`, and `rcon.rs`.
 
-## 技术栈
+Frontend tests are in `Palworld/tests/`. Product, architecture, and research documents are in `docs/` and `Palworld/docs/`. The prototype folders at the repository root are references, not the deployed application.
 
-- 前端：Vue 3、TypeScript、Pinia、Vite
-- 桌面端：Tauri 2、Rust
-- 包管理器：npm
+## Build, Test, and Development Commands
 
-## 常用命令
+Run commands from `Palworld/`:
 
-在 `Palworld` 目录执行：
+```powershell
+npm install             # install frontend dependencies
+npm run dev             # start the Vite UI server
+npm run lint            # run vue-tsc without emitting files
+npm run build           # type-check and create dist/
+npm run verify          # lint, then production build
+npx vitest run          # run the jsdom Vue test suite
+npm run tauri:dev       # run the desktop app in development
+npm run tauri:build     # create the release desktop package
+```
 
-- `npm run dev`：启动前端开发服务
-- `npm run build`：执行类型检查并构建前端
-- `npm run preview`：预览前端构建结果
-- `npm run tauri:dev`：启动桌面应用开发模式
-- `npm run tauri:build`：构建桌面应用
+For backend-only validation, run `cargo check` from `Palworld/src-tauri/`.
 
-## 代码规范
+## Coding Style & Naming Conventions
 
-- Vue 组件使用 `<script setup lang="ts">` 与 Composition API。
-- TypeScript 开启严格模式，避免未使用的变量和参数。
-- 使用 2 空格缩进、单引号，语句末尾不强制分号。
-- 组件文件使用 PascalCase，变量和函数使用 camelCase。
-- 通用视觉样式集中维护在 `Palworld/src/style.css`，业务状态保留在 Pinia store 中。
-- 修改后至少运行 `npm run build`，确保类型检查与生产构建通过。
+Use TypeScript strict mode and Vue Composition API with `<script setup lang="ts">`. Use 2-space indentation, single quotes, camelCase for functions and variables, and PascalCase for Vue components (for example, `ServerStatusCard.vue`). Keep user-facing UI text and Rust command errors in Chinese. Put shared visual tokens and global styles in `Palworld/src/style.css`.
+
+Components must call typed functions in `src/api/tauri.ts`; do not invoke Tauri commands directly from views or stores. Rust commands should return `Result<T, String>`, validate external input, and avoid `unsafe`.
+
+## Testing Guidelines
+
+Vitest uses jsdom and discovers `tests/**/*.spec.ts`. Name tests by behavior, such as `server-store.spec.ts`, and cover success, failure, and state-transition paths for changed functionality. Run `npx vitest run` and `npm run build` before submitting UI or API changes.
+
+## Commit & Pull Request Guidelines
+
+The existing history uses concise conventional-style subjects, e.g. `feat: initial commit — Palworld Server Manager (Tauri2 + Vue3)`. Use `feat:`, `fix:`, `docs:`, `refactor:`, or `test:` followed by an imperative summary. Keep commits focused.
+
+Pull requests should explain the user-visible change, list validation commands run, link relevant issues or documents, and include screenshots for visual changes. Do not commit `.env`, runtime logs, generated screenshots, or installed dependencies.
+
+## Configuration & Security
+
+Copy `Palworld/.env.example` to `Palworld/.env` for local configuration. Never hardcode credentials, and shell-escape any user-controlled values passed to PowerShell.

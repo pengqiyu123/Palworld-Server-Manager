@@ -1,0 +1,53 @@
+# oozextract —— vendored 解码器（仅解码，MIT）。
+#
+# 来源：https://github.com/lvlvllvlvllvlvl/oozextract  v0.5.4
+#       （MIT，纯 Rust Kraken 解码器；与参考 PalworldSaveTools 的 palooz 同宗同构）
+# 用途：Palworld .sav 的 PlM（Oodle/Kraken, save_type=49）解码。
+# 许可证：见同目录 LICENSE-MIT（随 MIT/Tauri 分发合规必需）。
+#
+# 相对上游官方发布做的精简（仅保留解码所需）：
+#   - crate-type 仅保留 rlib（去掉 cdylib）。
+#   - 去掉 `unoodle` bin 与 `criterion` bench。
+#   - 保留上游全部可选特性（async / tokio / wasm / cli / verbose_errors / x86_sse）
+#     但默认关闭；对应的可选依赖（clap / tokio / wasm-bindgen）仅作 optional 声明，
+#     默认不编译，从而避免 `#[cfg(feature=...)]` 的 unexpected-cfg 警告，且源码零改动。
+#   - 保留必需运行时依赖：bytemuck / bytes / futures / log / wide。
+#     注意：上游 Cargo.toml 正文仅列 bytemuck/bytes/wide/log，但 lib.rs 在
+#     read_sync 中通过 `futures::FutureExt::now_or_never` 驱动异步解码器，
+#     故 `futures` 为硬依赖，必须保留（否则无法编译）。
+
+[package]
+name = "oozextract"
+description = "Open source Kraken / Mermaid / Selkie / Leviathan / LZNA / Bitknit decompressor (vendored for Palworld Oodle/PLM decode)"
+repository = "https://github.com/lvlvllvlvllvlvl/oozextract"
+version = "0.5.4"
+edition = "2021"
+license = "MIT"
+exclude = ["testdata", "verify"]
+
+[lib]
+name = "oozextract"
+crate-type = ["rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+bytemuck = "1.19.0"
+bytes = "1.8.0"
+futures = "0.3.31"
+log = "0.4.22"
+wide = "0.7.28"
+
+# 可选依赖：对应可选特性，默认不启用、不编译。
+clap = { version = "4.5.20", optional = true, features = ["derive"] }
+tokio = { version = "1.41.0", optional = true, features = ["io-util"] }
+wasm-bindgen = { version = "0.2.95", optional = true }
+
+[features]
+default = []
+# 与上游一致的真实特性名（默认关闭，避免 unexpected-cfg 警告）。
+async = []
+tokio = ["async", "dep:tokio"]
+wasm = ["dep:wasm-bindgen"]
+cli = ["dep:clap"]
+verbose_errors = []
+x86_sse = []

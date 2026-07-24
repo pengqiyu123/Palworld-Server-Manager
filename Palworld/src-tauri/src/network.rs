@@ -327,7 +327,11 @@ pub struct RadminLanStatus {
 pub async fn check_port_usage(port: u16) -> Result<Option<String>, String> {
     let port_str = shell_escape::escape(port.to_string().into());
     let output = Command::new("powershell")
-        .args(["-Command", &format!("netstat -ano | findstr :{}", port_str)])
+        .args([
+            "-NoProfile",
+            "-Command",
+            &format!("netstat -ano -p UDP | findstr :{}", port_str),
+        ])
         .output()
         .map_err(|e| e.to_string())?;
 
@@ -373,6 +377,16 @@ mod tests {
     fn radmin_ip_prefix_is_26() {
         // 老板确认：Radmin 虚拟网段为 26.x.x.x（设计初稿 25.x 已更正）
         assert_eq!(RADMIN_IP_PREFIX, "26.");
+    }
+
+    #[tokio::test]
+    async fn port_usage_ignores_a_tcp_listener_when_checking_a_game_udp_port() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        assert_eq!(check_port_usage(port).await.unwrap(), None);
+
+        drop(listener);
     }
 
     #[test]

@@ -11,6 +11,7 @@
 export interface ServerStatus {
   running: boolean
   pid: number | null
+  managed_by_app: boolean
   server_path: string
   log_count: number
 }
@@ -40,6 +41,19 @@ export interface BackupInfo {
   name: string
   timestamp: string
   size_bytes: number
+}
+
+/**
+ * 一键填充默认配置的结果
+ * 对应 Rust: config.rs#FillConfigResult
+ */
+export interface FillConfigResult {
+  /** "already_filled" | "filled_from_template" | "filled_from_defaults" */
+  status: string
+  /** 实际命中/写入的来源路径或来源标识 */
+  source: string
+  /** 面向用户的中文提示（直接用于 Toast） */
+  message: string
 }
 
 // ==================== firewall.rs ====================
@@ -197,6 +211,7 @@ export type ServerCommand =
   | 'init_server_state'
   | 'start_server'
   | 'stop_server'
+  | 'force_stop_server'
   | 'get_server_status'
   | 'get_server_logs'
   | 'clear_server_logs'
@@ -212,6 +227,8 @@ export type ConfigCommand =
   | 'get_config_descriptions'
   | 'list_config_backups'
   | 'restore_config_backup'
+  | 'fill_default_config'
+  | 'is_config_initialized'
 
 /**
  * 预设相关命令
@@ -264,6 +281,12 @@ export interface WorldInfo {
   player_count: number
   /** 整目录字节数 */
   size_bytes: number
+  /** 来源：专用服="server"；本机单机="appdata"(AppData) | "steam"(Steam 库) */
+  source: string
+  /** 世界 GUID（GUID 嵌套布局下的子层目录名；扁平布局为 null） */
+  guid: string | null
+  /** 世界目录最后修改时间（格式化字符串） */
+  modified_at: string | null
 }
 
 /**
@@ -330,3 +353,115 @@ export interface OnboardingStepState {
   reason?: string
   action?: NextAction
 }
+
+// ==================== save_edit.rs (F5 存档迁移/改写 MVP) ====================
+// 字段名保持 snake_case，与 Rust 端结构体（未启用 rename_all）序列化结果一致。
+
+/** 世界中的单个玩家（f5_world_summary 返回，对应 Rust: save_edit::models::PlayerEntry） */
+export interface PlayerEntry {
+  player_uid: string
+  instance_id: string
+  guid: string
+  nickname: string
+  level: number
+  guild_id: string | null
+  pal_count: number
+  last_online: string
+  is_host: boolean
+}
+
+/** 公会（f5_world_summary 返回，对应 Rust: save_edit::models::GuildEntry） */
+export interface GuildEntry {
+  guild_id: string
+  name: string
+  admin_player_uid: string
+  players: string[]
+  handle_ids: string[]
+}
+
+/** 世界摘要（f5_world_summary 返回，对应 Rust: save_edit::models::WorldSummary） */
+export interface WorldSummary {
+  world_name: string
+  players: PlayerEntry[]
+  guilds: GuildEntry[]
+}
+
+/** 角色转移子集勾选（L4，对应 Rust: save_edit::models::TransferSubset） */
+export interface TransferSubset {
+  character: boolean
+  guild: boolean
+  tech: boolean
+  inventory: boolean
+  pals: boolean
+  appearance: boolean
+}
+
+/** Fix Host Save 请求（对应 Rust: save_edit::models::FixHostRequest） */
+export interface FixHostRequest {
+  world: string
+  old_host_guid: string
+  new_char_guid: string
+}
+
+/** 整包世界迁移请求（对应 Rust: save_edit::models::MigrateRequest） */
+export interface MigrateRequest {
+  source_world: string
+  target_world: string
+  /** 源类型："server"（默认，source_world 为世界名）| "local"（source_world 为本地世界绝对路径，后端穿透定位数据层）。 */
+  source_type: string
+  delete_world_option: boolean
+}
+
+/** 跨服角色转移请求（对应 Rust: save_edit::models::TransferRequest） */
+export interface TransferRequest {
+  source_world: string
+  target_world: string
+  selected_players: string[]
+  subset: TransferSubset
+  strategy: string
+}
+
+/** 科技点编辑请求（对应 Rust: save_edit::models::TechEditRequest） */
+export interface TechEditRequest {
+  world: string
+  player_guid: string
+  add_assets: string[]
+  remove_assets: string[]
+  mode: string
+}
+
+/** 玩家基础属性编辑请求（对应 Rust: save_edit::models::PlayerAttrRequest） */
+export interface PlayerAttrRequest {
+  world: string
+  player_guid: string
+  rename: string | null
+  level: number | null
+  max_all: boolean
+}
+
+/** 改写类命令的统一返回（对应 Rust: save_edit::models::EditResult） */
+export interface EditResult {
+  ok: boolean
+  backup_id: string
+  roundtrip_ok: boolean
+  warnings: string[]
+}
+
+/** 科技信息（f5_tech_list 返回，对应 Rust: save_edit::models::TechInfo） */
+export interface TechInfo {
+  name: string
+  asset: string
+  tech_type: string
+}
+
+/**
+ * 存档迁移/改写命令（F5）
+ */
+export type MigrationCommand =
+  | 'f5_world_summary'
+  | 'f5_tech_list'
+  | 'fix_host_save'
+  | 'migrate_world_to_server'
+  | 'transfer_character'
+  | 'edit_tech'
+  | 'edit_player_attr'

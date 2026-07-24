@@ -1,72 +1,95 @@
-%% ===== 4.1 首屏向导解锁（S1 自动探测，模拟）=====
 sequenceDiagram
-    actor U as 用户
-    participant O as OverviewView
-    participant S as UiStore
-    participant SB as Sidebar
-    U->>O: 点击「自动探测 PalServer.exe」
-    O->>S: startDetect() (detecting=true)
-    Note over O: setTimeout(1400ms) 模拟，禁 api.steam.detect
-    O->>S: finishDetect("D:\Steam\...\PalServer")
-    S->>SB: wizard.detected=true / detectedPath
-    SB-->>U: 状态卡：已配置·待启动 + 绿点
-    Note over S: step1→locked, step2→active
+    participant U as 服主
+    participant OV as OverviewView
+    participant S as ApiSteam(detect_palserver_path)
+    participant L as ApiLauncher(launch_*)
 
-%% ===== 4.2 导航切换 =====
-sequenceDiagram
-    actor U as 用户
-    participant N as Sidebar nav-item
-    participant R as vue-router
-    participant A as App.vue router-view
-    U->>N: 点击导航
-    N->>R: router.push(path)
-    R->>A: 切换组件 (Transition 淡入)
-    Note over N: active-class 由 route 驱动
+    U->>OV: 进入概览页（onMounted）
+    OV->>S: api.steam.detect()  // ① 服务器路径自动探测
+    S-->>OV: 命中 server_path 列表
+    OV-->>U: 第1步「服务器」显示「已定位 ✓」
+    Note over OV: ② Radmin / ③ 游戏 进入即并行探测可用性<br/>（Radmin 注册表/已知路径；游戏 steam://rungameid/1623730）
 
-%% ===== 4.3 折叠分组 / 搜索过滤（S2）=====
-sequenceDiagram
-    actor U as 用户
-    participant G as CfgGroup
-    participant C as ConfigView
-    U->>G: 点击分组头
-    G->>G: emit toggle() → collapsed 翻转
-    G->>G: body v-show
-    U->>C: 输入搜索
-    C->>C: 展开所有 group + 按 name 过滤
+    alt 任一路径探测失败
+        U->>OV: 点该路径项[手动选目录]
+        OV->>OV: PathDialog / dialog.open() 选目录（无写死默认）
+        OV->>OV: 校验并写回 settings.server_path（锁定）
+        OV-->>U: 该项显示「已定位 ✓」
+    end
 
-%% ===== 4.4 Tooltip 显隐 =====
-sequenceDiagram
-    actor U as 用户
-    participant I as InfoTip
-    participant S as UiStore
-    participant TT as Tooltip
-    U->>I: mouseenter(ⓘ)
-    I->>I: 计算锚点 rect
-    I->>S: setTooltip(true, html, x, y)
-    S-->>TT: 渲染气泡于(x,y)
-    U->>I: mouseleave
-    I->>S: hideTooltip() (80ms)
+    U->>OV: 第2步[启动服务器]
+    OV->>L: onStart() → start_server()  // 复用既有 handler
+    L-->>OV: 运行中
+    OV-->>U: 「启动服务器」卡显运行态 + [优雅关服][强制停止]
+    U->>OV: [启动 Radmin VPN]
+    OV->>L: onLaunchRadmin() → launch_radmin_vpn()
+    U->>OV: [启动游戏]
+    OV->>L: onLaunchGame() → launch_game()（steam://rungameid/1623730）
+    Note right of OV: 顶部 .lz-status 常驻卡已删除，运行态并入第2步卡
 
-%% ===== 4.5 配置项内联编辑 + 保存态（S2，模拟）=====
 sequenceDiagram
-    actor U as 用户
-    participant CI as CfgItem
-    participant V as ConfigView
-    participant T as Toast
-    U->>CI: 点击数值 → 内联 input
-    U->>CI: 输入 + Enter
-    CI->>V: emit update:modelValue → 本地 config + dirty
-    U->>V: 点击「保存配置」
-    V->>T: toast.success("配置已保存（模拟）")
-    Note over V: 不调 api.config.write()
+    participant U as 服主
+    participant SM as SaveManagementView
+    participant API as ApiSave
+    participant BE as SaveTransferCommands(Rust)
 
-%% ===== 4.6 模拟 RCON 收发（S4）=====
+    U->>SM: 进入「本地存档」页（onMounted）
+    par 专用服存档
+        SM->>API: discoverWorlds()
+        API->>BE: invoke('discover_worlds')
+        BE-->>API: WorldInfo[](source="server")
+        API-->>SM: 服务器世界列表（区块 B）
+    and 本机单机存档（Steam + AppData）
+        SM->>API: discoverLocalWorlds()
+        API->>BE: discover_local_worlds()
+        BE->>BE: detect_steam_library_roots() 扫 Steam 库
+        BE->>BE: dirs::data_local_dir()/Pal/Saved/SaveGames 扫 AppData
+        BE-->>API: WorldInfo[](source="steam"|"appdata") 合并去重
+        API-->>SM: 单机世界列表（区块 A）
+    end
+    SM-->>U: 区块 A「本地单机存档」按 source 打标签（AppData/Steam）合并展示
+
+    alt 两类都未匹配
+        SM-->>U: 区块 A 显[手动选择目录]（dialog.open 选根重扫）
+    end
+
+    U->>SM: 点击某 world 卡
+    SM->>SM: expanded = w（展开信息面板）
+    SM-->>U: 世界名/GUID/玩家数/修改时间/Level.sav 概要
+    U->>SM: 点[迁移到服务器]
+    SM->>U: 跳转 /migrate?source=<path>&type=local
+
 sequenceDiagram
-    actor U as 用户
-    participant R as RconView
-    participant T as Terminal
-    U->>R: 输入/快捷指令 SaveWorld 回车
-    R->>R: 正则匹配 /^saveworld/i
-    R->>T: appendLog(cmd, 'cmd')
-    R->>T: appendLog("World saved successfully", 'resp')
-    Note over R: 不调 api.rcon.send()
+    participant U as 服主
+    participant MV as SaveMigrationView
+    participant PP as PlayerPicker(x2)
+    participant API as ApiMigration
+
+    U->>MV: 进入迁移页 ③ 跨服角色转移区块
+    MV-->>U: 左栏「源世界（原数据）」+ 中「➜」+ 右栏「目标世界（新数据）」
+    U->>MV: 选源世界 / 目标世界
+    MV->>PP: 左 PlayerPicker :world-name=sourceWorld → worldSummary
+    MV->>PP: 右 PlayerPicker :world-name=targetWorld（只读展示）
+    PP-->>MV: PlayerEntry[](nickname/level/guild/pal/last_online)
+    MV-->>U: 两栏角色卡渲染 + 箭头标方向
+    U->>MV: 勾选多个源角色 + [保留公会 ID] + 子集
+    U->>MV: [执行角色转移]
+    MV->>API: transferCharacter(req)  // 复用既有，执行前二次确认弹窗
+    API-->>MV: EditResult
+    MV-->>U: 迁移完成提示
+    Note over U: 下方既有 Fix Host Save / 整包迁移 / 科技属性编辑区块不变
+
+sequenceDiagram
+    participant U as 服主
+    participant CV as ConfigView
+    participant API as ApiConfig
+    participant IT as InfoTip
+
+    U->>CV: 进入「配置」页（onMounted）
+    CV->>API: getDescriptions()
+    API-->>CV: ConfigValue[](name/description/...)
+    CV->>CV: 建 Map<name, description>
+    U->>CV: 悬停某配置项 ⓘ
+    CV->>IT: <InfoTip :html="description">
+    IT-->>U: 气泡显示人类可读简介
+    Note over CV: AdminPassword ⓘ 追加<br/>"复制按钮生成 /AdminPassword <密码> 可直接在游戏聊天框回车认证"

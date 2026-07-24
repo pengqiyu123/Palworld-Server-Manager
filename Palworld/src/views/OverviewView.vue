@@ -1,91 +1,15 @@
 <template>
   <section class="screen active">
-    <!-- ====== 仪表盘模式 ====== -->
-    <template v-if="isDashboard">
-      <div class="page-head">
-        <div>
-          <div class="page-title">服务器概览</div>
-          <div class="page-sub">服务器运行中 · 实时数据每 60 秒自动刷新</div>
-        </div>
-        <div class="page-actions">
-          <button class="btn btn-ghost" :disabled="launchingGame" @click="onLaunchGame">
-            {{ launchingGame ? '启动中…' : '启动游戏' }}
-          </button>
-          <button class="btn btn-ghost" :disabled="serverStore.loading" @click="onGracefulShutdown">
-            优雅关服
-          </button>
-          <button class="btn btn-danger" :disabled="serverStore.loading" @click="onForceStop">
-            强制停止
-          </button>
-        </div>
-      </div>
+    <!-- 配置空白横幅（P1）：PalWorldSettings.ini 未初始化时提示 -->
+    <div class="config-banner" v-if="serverPathDetected && !isConfigInitialized">
+      <AppIcon name="info" :size="16" />
+      <span class="config-banner-text">
+        检测到 <code>PalWorldSettings.ini</code> 为空或未含配置，开服前需先填充默认配置。
+      </span>
+      <button class="btn btn-ghost btn-sm" @click="onFillDefault">点此立即填充默认配置</button>
+    </div>
 
-      <!-- 服务器信息卡片 -->
-      <div class="dash-info-row">
-        <div class="dash-info-card">
-          <span class="di-label">服务器名称</span>
-          <span class="di-value">{{ serverInfo?.servername ?? '—' }}</span>
-        </div>
-        <div class="dash-info-card">
-          <span class="di-label">游戏版本</span>
-          <span class="di-value">{{ serverInfo?.version ?? '—' }}</span>
-        </div>
-        <div class="dash-info-card">
-          <span class="di-label">世界 GUID</span>
-          <span class="di-value mono">{{ serverInfo?.worldguid ? serverInfo.worldguid.slice(0, 12) + '…' : '—' }}</span>
-        </div>
-      </div>
-
-      <!-- 指标卡片 -->
-      <div class="dash-metrics-row">
-        <div class="metric-card">
-          <span class="m-label">FPS</span>
-          <span class="m-value">{{ formatNum(serverMetrics?.serverfps) }}</span>
-        </div>
-        <div class="metric-card">
-          <span class="m-label">平均 FPS</span>
-          <span class="m-value">{{ formatNum(serverMetrics?.serverfpsaverage) }}</span>
-        </div>
-        <div class="metric-card">
-          <span class="m-label">在线人数</span>
-          <span class="m-value">{{ serverMetrics?.currentplayernum ?? 0 }} / {{ serverMetrics?.maxplayernum ?? 32 }}</span>
-        </div>
-        <div class="metric-card">
-          <span class="m-label">游戏天数</span>
-          <span class="m-value">{{ serverMetrics?.days ?? '—' }}</span>
-        </div>
-        <div class="metric-card">
-          <span class="m-label">运行时长</span>
-          <span class="m-value">{{ formatUptime(serverMetrics?.uptime) }}</span>
-        </div>
-        <div class="metric-card">
-          <span class="m-label">帧时间</span>
-          <span class="m-value">{{ formatNum(serverMetrics?.serverframetime) }} ms</span>
-        </div>
-      </div>
-
-      <!-- 进程状态 -->
-      <div class="dash-proc-row">
-        <StatusPill status="ok" :text="`运行中 · PID ${serverStore.status.pid ?? '?'}`" />
-        <span class="dash-proc-path" v-if="settingsStore.settings.server_path">
-          {{ settingsStore.settings.server_path }}
-        </span>
-      </div>
-
-      <!-- 联机健康总览（7 步引导，收官 M2） -->
-      <div class="guide-section">
-        <div class="guide-title">联机健康总览 · 7 步引导</div>
-        <OnboardingProgress :steps="onboardingStore.steps" />
-        <div class="guide-legend">
-          <span><i class="lg-dot pass" /> 已通过</span>
-          <span><i class="lg-dot fail" /> 待处理</span>
-          <span><i class="lg-dot idle" /> 未开始</span>
-        </div>
-      </div>
-    </template>
-
-    <!-- ====== 向导模式 ====== -->
-    <template v-else>
+    <!-- 概览始终保留路径与操作区；运行态只更新服务器卡片。 -->
       <div class="s1-wrap">
         <div class="s1-col">
           <div class="step-badge">
@@ -105,62 +29,112 @@
             不用记命令行，也能开关服、图形化改配置、和朋友联机。先告诉我你的 PalServer.exe 在哪里——点下方"自动探测"，我来帮你找。
           </p>
 
-          <div class="steps-row">
-            <StepCard
-              :num="1"
-              title="定位服务器"
-              desc="自动找到 PalServer.exe 所在目录"
-              :state="step1State"
-            />
-            <StepCard
-              :num="2"
-              title="检查网络端口"
-              desc="确认游戏/RCON/REST 端口已放行、可连通"
-              :state="step2State"
-            />
-            <StepCard
-              :num="3"
-              title="启动并联机"
-              desc="一键开服，把虚拟局域网 IP 发给朋友"
-              :state="step3State"
-            />
-          </div>
-
-          <div class="cta-row">
-            <button
-              class="btn-detect"
-              :disabled="uiStore.wizard.detecting"
-              @click="onDetect"
-            >
-              <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-                <circle cx="8" cy="8" r="5" stroke="#FFFFFF" stroke-width="1.6" />
-                <path d="M12 12L15.5 15.5" stroke="#FFFFFF" stroke-width="1.6" stroke-linecap="round" />
-              </svg>
-              <span>{{ detectLabel }}</span>
-            </button>
-            <button class="btn-ghost" @click="onManual">手动选择目录…</button>
-          </div>
-
-          <!-- Step 2: 端口状态（探测完成后显示） -->
-          <div v-if="uiStore.wizard.detected" class="wizard-step2">
-            <div class="ws2-title">网络端口状态</div>
-            <div class="ws2-ports">
-              <StatusPill :status="networkStore.firewall.port_8211_open ? 'ok' : 'block'" text="游戏 8211 UDP" />
-              <StatusPill :status="networkStore.firewall.port_25575_open ? 'ok' : 'block'" text="RCON 25575 TCP" />
-              <StatusPill :status="networkStore.firewall.port_8212_open ? 'ok' : 'block'" text="REST 8212 TCP" />
+          <!-- StepCard 1：获取三个应用路径（StepCard 当标题卡 + 下方 glass 操作区） -->
+          <div class="sc-block">
+            <StepCard :num="1" title="获取应用路径" desc="自动定位 服务器 / Radmin / 游戏" :state="step1State" />
+            <div class="sc-body">
+              <!-- 服务器：已定位显路径；未定位显「自动探测」(onDetect) + 「手动选目录」(onManualServer) -->
+              <div class="sc-path-row" :class="{ ok: serverPathDetected }">
+                <span class="sc-num">1</span>
+                <div class="sc-path-info">
+                  <span class="sc-path-name">服务器 (PalServer)</span>
+                  <span class="sc-path-state" :class="serverPathDetected ? 'ok' : 'todo'">
+                    {{ serverPathDetected ? '已定位 ✓' : '待定位' }}
+                  </span>
+                  <span v-if="serverPathDetected" class="sc-path-detail">{{ settingsStore.settings.server_path }}</span>
+                </div>
+                <button v-if="!serverPathDetected" class="btn btn-ghost btn-sm" :disabled="uiStore.wizard.detecting" @click="onDetect">{{ detectLabel }}</button>
+                <button v-if="!serverPathDetected" class="btn btn-ghost btn-sm" @click="onManualServer">手动选目录</button>
+              </div>
+              <!-- Radmin：networkStore.checkRadmin 态；未定位显「手动选目录」(onManualRadmin) -->
+              <div class="sc-path-row" :class="{ ok: radminDetected, fail: radminNotInstalled }">
+                <span class="sc-num">2</span>
+                <div class="sc-path-info">
+                  <span class="sc-path-name">Radmin VPN</span>
+                  <span class="sc-path-state" :class="radminDetected ? 'ok' : radminNotInstalled ? 'fail' : 'todo'">
+                    {{ radminDetected ? '已定位 ✓' : radminNotInstalled ? '未安装' : '待定位' }}
+                  </span>
+                  <span v-if="radminPath" class="sc-path-detail">{{ radminPath }}</span>
+                  <span v-if="radminNotInstalled" class="sc-path-hint">请先安装 Radmin VPN</span>
+                </div>
+                <button v-if="!radminDetected" class="btn btn-ghost btn-sm" @click="onManualRadmin">手动选目录</button>
+              </div>
+              <!-- 游戏：steam://rungameid/1623730 探测；未定位显「手动确认」(onManualGame) -->
+              <div class="sc-path-row" :class="{ ok: gameDetected }">
+                <span class="sc-num">3</span>
+                <div class="sc-path-info">
+                  <span class="sc-path-name">游戏 (Palworld)</span>
+                  <span class="sc-path-state" :class="gameDetected ? 'ok' : 'todo'">
+                    {{ gameDetected ? '已定位 ✓' : '待定位' }}
+                  </span>
+                  <span v-if="gameDetected" class="sc-path-detail">steam://rungameid/1623730</span>
+                </div>
+                <button v-if="!gameDetected" class="btn btn-ghost btn-sm" @click="onManualGame">手动确认</button>
+              </div>
             </div>
           </div>
 
-          <!-- Step 3: 启动按钮 -->
-          <div v-if="uiStore.wizard.detected" class="wizard-step3">
-            <button
-              class="btn btn-primary btn-lg"
-              :disabled="serverStore.loading"
-              @click="onStart"
-            >
-              {{ serverStore.loading ? '启动中…' : '启动服务器' }}
-            </button>
-            <span class="ws3-path">{{ detectedPath }}</span>
+          <!-- StepCard 2：启动并联机 -->
+          <div class="sc-block">
+            <StepCard :num="2" title="启动并联机" desc="开服 + Radmin + 游戏客户端" :state="step2State" />
+            <div class="sc-body sc-launch-row">
+              <!-- 服务器：!isRunning→启动服务器(onStart)；isRunning→优雅关服+强制停止 -->
+              <div class="sc-launch-card" :class="{ done: isRunning }">
+                <div class="sc-lc-head">
+                  <span class="sc-num">1</span>
+                  <span class="sc-lc-state" :class="isRunning ? 'ok' : 'todo'">{{ isRunning ? '运行中' : '未启动' }}</span>
+                </div>
+                <div class="sc-lc-title">服务器</div>
+                <div class="sc-lc-desc">
+                  {{ isRunning
+                    ? serverStore.status.managed_by_app
+                      ? '由管理器后台启动；日志在「实时日志」中。'
+                      : '手动启动的服务器日志在黑色窗口中；管理器可查看状态和关服。'
+                    : '启动 PalServer，让朋友能连入你的专用服。' }}
+                </div>
+                <div v-if="isRunning" class="sc-runtime">
+                  <span>PID {{ serverStore.status.pid ?? '未知' }}</span>
+                  <span>游戏端口使用 8211/UDP</span>
+                </div>
+                <button
+                  v-if="!isRunning"
+                  class="btn btn-primary btn-sm"
+                  :disabled="!serverPathDetected || serverStore.loading"
+                  @click="onStart"
+                >
+                  {{ serverStore.loading ? '启动中…' : '启动服务器' }}
+                </button>
+                <template v-else>
+                  <button class="btn btn-ghost btn-sm" :disabled="serverStore.loading" @click="onGracefulShutdown">优雅关服</button>
+                  <button class="btn btn-danger-ghost btn-sm" :disabled="serverStore.loading" @click="onForceStop">强制停止</button>
+                </template>
+              </div>
+              <!-- Radmin：onLaunchRadmin -->
+              <div class="sc-launch-card" :class="{ done: radminLaunched }">
+                <div class="sc-lc-head">
+                  <span class="sc-num">2</span>
+                  <span class="sc-lc-state" :class="radminLaunched ? 'ok' : 'todo'">{{ radminLaunched ? '已就绪' : '待就绪' }}</span>
+                </div>
+                <div class="sc-lc-title">Radmin VPN</div>
+                <div class="sc-lc-desc">拉起 Radmin VPN，建立虚拟局域网便于联机。</div>
+                <button class="btn btn-primary btn-sm" :disabled="launchingRadmin" @click="onLaunchRadmin">
+                  <AppIcon name="vpn" :size="16" />
+                  <span>{{ launchingRadmin ? '启动中…' : '启动 Radmin VPN' }}</span>
+                </button>
+              </div>
+              <!-- 游戏：onLaunchGame -->
+              <div class="sc-launch-card">
+                <div class="sc-lc-head">
+                  <span class="sc-num">3</span>
+                  <span class="sc-lc-state" :class="gameDetected ? 'ok' : 'todo'">{{ gameDetected ? '已启动' : '待启动' }}</span>
+                </div>
+                <div class="sc-lc-title">游戏</div>
+                <div class="sc-lc-desc">启动本地 Steam 帕鲁客户端，进服联机。</div>
+                <button class="btn btn-ghost btn-sm" :disabled="launchingGame" @click="onLaunchGame">
+                  {{ launchingGame ? '启动中…' : '启动游戏' }}
+                </button>
+              </div>
+            </div>
           </div>
 
           <div class="tip-row">
@@ -173,8 +147,6 @@
           </div>
         </div>
       </div>
-    </template>
-
     <!-- ====== 确认弹窗 ====== -->
     <ConfirmDialog
       v-model:visible="confirmVisible"
@@ -183,11 +155,15 @@
       :danger="confirmDanger"
       @confirm="onConfirm"
     />
+
+    <!-- F2 · 启动 Radmin VPN 后的加入引导弹窗（从网络页迁入） -->
+    <RadminLaunchModal v-model:visible="radminLaunchVisible" />
   </section>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { useUiStore } from '@/stores/ui'
 import { useServerStore } from '@/stores/server'
 import { useSettingsStore } from '@/stores/settings'
@@ -195,10 +171,11 @@ import { useNetworkStore } from '@/stores/network'
 import { useToast } from '@/components/ui/useToast'
 import { useOnboardingStore } from '@/stores/onboarding'
 import { api } from '@/api/tauri'
+import { open } from '@tauri-apps/plugin-dialog'
 import StepCard from '@/components/ui/StepCard.vue'
-import StatusPill from '@/components/ui/StatusPill.vue'
 import ConfirmDialog from '@/components/ui/ConfirmDialog.vue'
-import OnboardingProgress from '@/components/ui/OnboardingProgress.vue'
+import AppIcon from '@/components/ui/AppIcon.vue'
+import RadminLaunchModal from '@/components/ui/RadminLaunchModal.vue'
 
 const uiStore = useUiStore()
 const serverStore = useServerStore()
@@ -206,19 +183,31 @@ const settingsStore = useSettingsStore()
 const networkStore = useNetworkStore()
 const onboardingStore = useOnboardingStore()
 const toast = useToast()
+const router = useRouter()
 
 const launchingGame = ref(false)
+const launchingRadmin = ref(false)
+const radminLaunched = ref(false)
+const radminLaunchVisible = ref(false)
+// R3 · 第 1 步三路径探测态
+const radminDetected = ref(false)
+const radminNotInstalled = ref(false)
+const radminPath = ref('')
+const gameDetected = ref(false)
 
 // ====== 联机成功一次性回调（D1 验收时刻） ======
 // 第 7 步（S7 朋友入服）首次 players>=2 时由 onboardingStore 幂等触发（successFired 锁，仅一次）
-onMounted(() => {
+onMounted(async () => {
   onboardingStore.onSuccess(() => {
     toast.success('🎉 联机成功！朋友已连入你的帕鲁服，D1 验收达成 🏆')
   })
+  await checkConfigInitialized()
+  void detectPaths()
 })
 
-// ====== 双模式判定 ======
-const isDashboard = computed(() => uiStore.wizard.mode === 'dashboard')
+// 启动区常驻所需的运行状态判定（与 Sidebar 同源）
+const isRunning = computed(() => serverStore.status.running)
+const serverPathDetected = computed(() => !!settingsStore.settings.server_path)
 
 // ====== F3 · 启动游戏本体 ======
 async function onLaunchGame(): Promise<void> {
@@ -227,6 +216,7 @@ async function onLaunchGame(): Promise<void> {
   try {
     const msg = await api.launcher.launchGame()
     toast.success(msg)
+    gameDetected.value = true
   } catch (e) {
     toast.error(`启动游戏失败: ${e instanceof Error ? e.message : String(e)}`)
   } finally {
@@ -237,20 +227,19 @@ async function onLaunchGame(): Promise<void> {
 // ====== 向导模式 ======
 const detectLabel = ref('自动探测 PalServer.exe')
 
-const detectedPath = computed(() => {
-  return settingsStore.settings.server_path || uiStore.wizard.detectedPath
-})
-
-const step1State = computed<'active' | 'locked'>(() =>
-  uiStore.wizard.detected ? 'locked' : 'active'
+const step1State = computed<'active' | 'locked' | 'done'>(() =>
+  serverPathDetected.value && radminDetected.value && gameDetected.value ? 'done' : 'active'
 )
-const step2State = computed<'active' | 'locked'>(() =>
-  uiStore.wizard.detected ? 'active' : 'locked'
+const step2State = computed<'active' | 'locked' | 'done'>(() =>
+  isRunning.value ? 'done' : serverPathDetected.value ? 'active' : 'locked'
 )
-const step3State = computed(() => 'locked' as const)
 
 const wizardStepText = computed(() =>
-  uiStore.wizard.detected ? '第 1 步已完成 ✓ · 进入第 2 步' : '首次设置 · 第 1 步，共 3 步'
+  isRunning.value
+    ? '服务器运行中 · 可优雅关服'
+    : serverPathDetected.value
+      ? '路径已就绪 · 点击启动开服'
+      : '首次设置 · 定位应用路径'
 )
 
 async function onDetect(): Promise<void> {
@@ -279,10 +268,58 @@ async function onDetect(): Promise<void> {
   }
 }
 
-function onManual(): void {
-  const path = settingsStore.settings.server_path || 'D:\\Steam\\steamapps\\common\\Palworld\\PalServer'
-  uiStore.setManual(path)
-  detectLabel.value = `✓ 已指定 ${path}`
+// ====== R3 · 第 1 步：自动探测三应用路径 ======
+async function detectPaths(): Promise<void> {
+  // 服务器：若已设置则已定位；否则自动探测并写回
+  if (!serverPathDetected.value) {
+    try {
+      const paths = await api.steam.detect()
+      if (paths.length > 0) {
+        settingsStore.update({ server_path: paths[0] })
+        await settingsStore.save()
+        uiStore.finishDetect(paths[0])
+        detectLabel.value = `✓ 已找到 ${paths[0]}`
+      }
+    } catch {
+      // 探测失败静默，显示「待定位」+ 手动选目录
+    }
+  }
+  // Radmin：通过联机就绪度旧接口检测安装状态（不依赖 server_path）
+  try {
+    await networkStore.checkRadmin()
+    radminDetected.value = networkStore.radmin.installed
+    radminNotInstalled.value = !networkStore.radmin.installed
+    radminPath.value = networkStore.radmin.installed
+      ? networkStore.radmin.virtual_ip
+        ? `虚拟网卡 ${networkStore.radmin.virtual_ip}`
+        : '已安装 Radmin VPN'
+      : ''
+  } catch {
+    // 静默
+  }
+}
+
+// 手动选目录（dialog，不写死默认路径，R1③）
+async function onManualServer(): Promise<void> {
+  const dir = await open({ directory: true })
+  if (typeof dir !== 'string' || !dir) return
+  settingsStore.update({ server_path: dir })
+  await settingsStore.save()
+  uiStore.finishDetect(dir)
+  detectLabel.value = `✓ 已指定 ${dir}`
+}
+
+async function onManualRadmin(): Promise<void> {
+  const dir = await open({ directory: true })
+  if (typeof dir !== 'string' || !dir) return
+  radminDetected.value = true
+  radminPath.value = dir
+  toast.success('已记录 Radmin VPN 路径')
+}
+
+function onManualGame(): void {
+  gameDetected.value = true
+  toast.success('已记录游戏可用（steam://rungameid/1623730）')
 }
 
 async function onStart(): Promise<void> {
@@ -291,35 +328,24 @@ async function onStart(): Promise<void> {
     toast.error('请先定位服务器目录')
     return
   }
+  await checkConfigInitialized()
+  if (!isConfigInitialized.value) {
+    toast.info('首次开服，请先完成配置')
+    await router.push('/config?firstTime=true')
+    return
+  }
   try {
     await serverStore.start(path)
     if (serverStore.status.running) {
-      uiStore.setMode('dashboard')
       serverStore.startPolling()
-      toast.success('服务器已启动')
+      toast.success(`服务器已就绪（PID ${serverStore.status.pid ?? '未知'}）`)
+    } else {
+      // spawn 返回但 running=false（罕见，如进程立即退出）——诚实告知
+      toast.warning('服务器启动异常：进程未持续运行，请检查日志')
     }
   } catch (e) {
     toast.error(`启动失败: ${e instanceof Error ? e.message : String(e)}`)
   }
-}
-
-// ====== 仪表盘模式 ======
-const serverInfo = computed(() => serverStore.serverInfo)
-const serverMetrics = computed(() => serverStore.serverMetrics)
-
-function formatNum(v: number | null | undefined): string {
-  if (v === null || v === undefined) return '—'
-  return Number.isInteger(v) ? String(v) : v.toFixed(1)
-}
-
-function formatUptime(seconds: number | null | undefined): string {
-  if (seconds === null || seconds === undefined) return '—'
-  const h = Math.floor(seconds / 3600)
-  const m = Math.floor((seconds % 3600) / 60)
-  const s = seconds % 60
-  if (h > 0) return `${h}h ${m}m`
-  if (m > 0) return `${m}m ${s}s`
-  return `${s}s`
 }
 
 // ====== 确认弹窗 ======
@@ -352,7 +378,6 @@ async function onForceStop(): Promise<void> {
   confirmAction = async () => {
     try {
       await serverStore.forceStop()
-      uiStore.setMode('wizard')
       toast.info('服务器已强制停止')
     } catch (e) {
       toast.error(`停止失败: ${e instanceof Error ? e.message : String(e)}`)
@@ -365,6 +390,53 @@ async function onConfirm(): Promise<void> {
   if (confirmAction) {
     await confirmAction()
     confirmAction = null
+  }
+}
+
+// ====== 常驻启动区：Radmin VPN 启动（从网络页迁入）======
+async function onLaunchRadmin(): Promise<void> {
+  if (launchingRadmin.value) return
+  launchingRadmin.value = true
+  try {
+    const msg = await api.launcher.launchRadminVpn()
+    toast.success(msg)
+    radminLaunched.value = true
+    radminDetected.value = true
+    radminNotInstalled.value = false
+    radminLaunchVisible.value = true
+  } catch (e) {
+    toast.error(`启动 Radmin VPN 失败: ${e instanceof Error ? e.message : String(e)}`)
+  } finally {
+    launchingRadmin.value = false
+  }
+}
+
+// ====== 配置空白横幅（P1）：探测 live 是否已含 OptionSettings=( ======
+const isConfigInitialized = ref(false)
+async function checkConfigInitialized(): Promise<void> {
+  if (!serverPathDetected.value) {
+    isConfigInitialized.value = false
+    return
+  }
+  try {
+    isConfigInitialized.value = await api.config.isInitialized(settingsStore.settings.server_path)
+  } catch {
+    isConfigInitialized.value = false
+  }
+}
+
+// ====== 一键填充默认配置（仅手动触发，绝不接入 start_server 自动守卫）======
+async function onFillDefault(): Promise<void> {
+  if (!serverPathDetected.value) {
+    toast.warning('尚未设置服务器路径，请先到【设置】填写 PalServer 根目录')
+    return
+  }
+  try {
+    const res = await api.config.fillDefault(settingsStore.settings.server_path)
+    toast.success(res.message)
+    isConfigInitialized.value = true
+  } catch (e) {
+    toast.error(`填充默认配置失败: ${e instanceof Error ? e.message : String(e)}`)
   }
 }
 </script>
@@ -506,5 +578,180 @@ async function onConfirm(): Promise<void> {
 }
 .lg-dot.idle {
   background: rgba(0, 0, 0, 0.12);
+}
+
+/* ====== 配置空白横幅（P1）====== */
+.config-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-radius: 10px;
+  background: var(--amber-bg, rgba(184, 120, 47, 0.14));
+  border: 1px solid rgba(184, 120, 47, 0.32);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--palwarm-text-primary, #3f322c);
+}
+.config-banner :deep(svg) {
+  flex: 0 0 16px;
+  color: var(--amber, #b8782f);
+}
+.config-banner-text { flex: 1; min-width: 0; }
+.config-banner code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: rgba(116, 88, 72, 0.1);
+  padding: 1px 5px;
+  border-radius: 5px;
+}
+
+/* ====== 向导操作区（StepCard 标题卡 + 下方 glass 操作区）====== */
+.sc-block {
+  margin-top: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.sc-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+/* 路径行 */
+.sc-path-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: var(--r-card, 12px);
+  background: var(--glass-bg, rgba(255, 252, 247, 0.72));
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border, rgba(116, 88, 72, 0.14));
+}
+.sc-path-row.ok {
+  border-color: rgba(79, 138, 107, 0.4);
+  background: var(--green-bg, rgba(79, 138, 107, 0.08));
+}
+.sc-path-row.fail {
+  border-color: rgba(201, 85, 77, 0.4);
+  background: var(--red-bg, rgba(201, 85, 77, 0.08));
+}
+.sc-num {
+  width: 24px;
+  height: 24px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--primary, #e66f51);
+  color: #fff;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  font-weight: 700;
+  flex: 0 0 24px;
+}
+.sc-path-row.ok .sc-num,
+.sc-launch-card.done .sc-num { background: var(--green, #4f8a6b); }
+.sc-path-info {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+.sc-path-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--palwarm-text-primary, #3f322c);
+}
+.sc-path-state {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+.sc-path-state.ok { background: var(--green-bg, rgba(79, 138, 107, 0.14)); color: var(--green, #4f8a6b); }
+.sc-path-state.todo { background: rgba(116, 88, 72, 0.10); color: var(--text-mid2, #8a7a6e); }
+.sc-path-state.fail { background: var(--red-bg, rgba(201, 85, 77, 0.14)); color: var(--red, #c9554d); }
+.sc-path-hint {
+  font-size: 12px;
+  color: var(--red, #c9554d);
+  font-weight: 500;
+}
+.sc-path-detail {
+  font-size: 12px;
+  color: var(--text-mid2, #8a7a6e);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+/* 启动卡片行 — 固定三列一行（老板要 1 2 3 不折成 1 / 2 3） */
+.sc-launch-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+@media (max-width: 720px) {
+  .sc-launch-row { grid-template-columns: 1fr; }
+}
+.sc-launch-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  border-radius: var(--r-card, 12px);
+  background: var(--glass-bg, rgba(255, 252, 247, 0.72));
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border, rgba(116, 88, 72, 0.14));
+}
+.sc-launch-card.done {
+  background: var(--green-bg, rgba(79, 138, 107, 0.10));
+  border-color: rgba(79, 138, 107, 0.4);
+}
+.sc-lc-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sc-lc-state {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+.sc-lc-state.ok { background: var(--green-bg, rgba(79, 138, 107, 0.14)); color: var(--green, #4f8a6b); }
+.sc-lc-state.todo { background: rgba(116, 88, 72, 0.10); color: var(--text-mid2, #8a7a6e); }
+.sc-lc-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--palwarm-text-primary, #3f322c);
+}
+.sc-lc-desc {
+  font-size: 12px;
+  color: var(--text-mid2, #8a7a6e);
+  line-height: 1.5;
+  flex: 1;
+}
+.sc-runtime {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-mid2, #8a7a6e);
+}
+.sc-launch-card .btn { justify-content: center; }
+/* §2.5 仪表盘关服按钮组（右对齐） */
+.dash-proc-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
 }
 </style>

@@ -117,6 +117,11 @@ const ICONS: Record<string, { vb: string; inner: string }> = {
     vb: '0 0 22 22',
     inner: '<path d="M4 5H15L18 8V17C18 17.6 17.6 18 17 18H5C4.4 18 4 17.6 4 17V5Z" stroke="#e66f51" stroke-width="1.4" fill="none" stroke-linejoin="round"/><path d="M7 5V9H13V5" stroke="#e66f51" stroke-width="1.4" fill="none"/><circle cx="11" cy="13" r="1.8" stroke="#e66f51" stroke-width="1.4" fill="none"/>',
   },
+  // —— 存档迁移（暖橙，F5 新增） ——
+  migration: {
+    vb: '0 0 22 22',
+    inner: '<rect x="3" y="6.5" width="7" height="10" rx="1.5" stroke="#e66f51" stroke-width="1.4" fill="none"/><path d="M12 11.5H15.5M14 9.5L16.5 11.5L14 13.5" stroke="#e66f51" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/><rect x="17" y="6.5" width="2.5" height="10" rx="1" stroke="#e66f51" stroke-width="1.4" fill="none"/>',
+  },
   'ph-backup': {
     vb: '0 0 56 56',
     inner: '<rect x="9" y="9" width="38" height="38" rx="5" stroke="#a39383" stroke-width="2.4" fill="none"/><path d="M18 9V18H38V9" stroke="#a39383" stroke-width="2.4" fill="none"/><circle cx="28" cy="32" r="6" stroke="#a39383" stroke-width="2.4" fill="none"/>',

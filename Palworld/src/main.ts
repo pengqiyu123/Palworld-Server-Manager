@@ -18,7 +18,6 @@ import { useSettingsStore } from '@/stores/settings'
 import { useServerStore } from '@/stores/server'
 import { useConfigStore } from '@/stores/config'
 import { useNetworkStore } from '@/stores/network'
-import { useUiStore } from '@/stores/ui'
 
 const app = createApp(App)
 
@@ -55,7 +54,7 @@ const MOCK = (env?.VITE_MOCK ?? 'true') !== 'false'
  *   3. serverStore.setupLogListener() + setupStatusChangeListener() — 订阅 Rust 事件
  *   4. configStore.loadDescriptions() — 加载配置项元信息
  *   5. networkStore.checkAll() — 防火墙 + Radmin 并行检测
- *   6. 双模式判定：running → dashboard + startPolling / 否则 wizard
+ *   6. 若服务器已运行，启动 REST 轮询；概览页始终保持同一操作界面。
  */
 async function bootstrapStores(): Promise<void> {
   if (MOCK) {
@@ -71,7 +70,6 @@ async function bootstrapStores(): Promise<void> {
   const serverStore = useServerStore()
   const configStore = useConfigStore()
   const networkStore = useNetworkStore()
-  const uiStore = useUiStore()
 
   // 1. 加载设置 + 探测服务器路径
   try {
@@ -82,7 +80,7 @@ async function bootstrapStores(): Promise<void> {
 
   // 2. 初始化服务器进程状态
   try {
-    await serverStore.init()
+    await serverStore.init(settingsStore.settings.server_path)
   } catch (e) {
     console.warn('初始化服务器状态失败:', e)
   }
@@ -109,12 +107,9 @@ async function bootstrapStores(): Promise<void> {
     console.warn('网络检测失败:', e)
   }
 
-  // 6. 双模式判定
+  // 6. 运行中的服务器需要 REST 数据；概览页不再切换到另一套模式。
   if (serverStore.status.running) {
-    uiStore.setMode('dashboard')
     serverStore.startPolling()
-  } else {
-    uiStore.setMode('wizard')
   }
 }
 

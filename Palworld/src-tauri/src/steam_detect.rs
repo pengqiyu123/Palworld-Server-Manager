@@ -7,6 +7,7 @@
 //!    命中则把该 exe 的父目录（即 `.../PalServer` 目录，正是前端要填的 server_path）加入结果。
 //! 4. 全程安全降级：任何注册表读取 / VDF 解析 / 路径检查异常都返回空或跳过该根，绝不 panic。
 
+use std::path::PathBuf;
 use tauri::command;
 
 #[cfg(windows)]
@@ -106,6 +107,40 @@ fn read_steam_install_path() -> Option<String> {
     }
 
     None
+}
+
+/// 动态探测全部 Steam 库根目录（注册表 Steam 安装路径 + 两处 libraryfolders.vdf）。
+///
+/// 抽出 `detect_palserver_path` 内的库根推导逻辑，供 `save_transfer` / `path_util`
+/// 的存档扫描复用，替代写死的 `STEAM_LIBRARY_ROOTS`。
+///
+/// 返回可能为空的列表；调用方应自行决定兜底策略
+/// （保留 `STEAM_LIBRARY_ROOTS` 作为最后兜底，仅动态探测全失败时使用）。
+#[cfg(windows)]
+pub fn detect_steam_library_roots() -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let steam_root = match read_steam_install_path() {
+        Some(p) => p,
+        None => return roots,
+    };
+    roots.push(PathBuf::from(&steam_root));
+    for vdf_rel in ["steamapps\\libraryfolders.vdf", "config\\libraryfolders.vdf"] {
+        let vdf_path = Path::new(&steam_root).join(vdf_rel);
+        if let Ok(text) = std::fs::read_to_string(&vdf_path) {
+            for r in parse_library_roots(&text) {
+                roots.push(PathBuf::from(r));
+            }
+        }
+    }
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+/// 非 Windows 平台下返回空列表（无 Steam 库可探测），保证跨平台可编译。
+#[cfg(not(windows))]
+pub fn detect_steam_library_roots() -> Vec<PathBuf> {
+    Vec::new()
 }
 
 /// 自动探测 PalServer.exe 所在目录（Windows 真实实现）。

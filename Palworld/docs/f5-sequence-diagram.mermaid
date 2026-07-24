@@ -1,0 +1,84 @@
+%% ============ 4.1 Fix Host Save 主链路（P0 灵魂步骤） ============
+sequenceDiagram
+    actor U as 用户
+    participant FE as F5 视图
+    participant Srv as server.rs(F1/F3)
+    participant B as save_transfer.rs(F4)
+    participant E as save_edit.rs(F5)
+    participant FS as 文件系统
+
+    U->>FE: 选世界 + 填 旧主机GUID / 新角色GUID
+    FE->>Srv: stop_server()  // 先停服（R6）
+    Srv-->>FE: ServerStatus{running:false}
+    FE->>B: backup_world(world)  // 改写前整目录备份
+    B-->>FS: 写 _backups/<world>/<ts>/
+    B-->>FE: 成功消息
+    FE->>B: list_world_backups(world)
+    B-->>FE: [最新 backup_id]  // 记录 active_backup_id
+    FE->>E: fix_host_save(FixHostRequest)
+    E->>E: 断言服务器已停（读 ServerState）
+    E->>E: 版本门控 save_game_version==3? 否则中止(R1)
+    E->>FS: SavFile::load(Level.sav + Players/<old>.sav + <new>.sav)
+    E->>E: UID 互换: Players SaveData.PlayerUId/IndividualId
+    E->>E: Level CharacterSaveParameterMap(按 InstanceId)
+    E->>E: GroupSaveDataMap(admin/players/handle_ids)
+    E->>E: _dps.sav + PalStorageContainerId
+    E->>E: 深度遍历 OwnerPlayerUId/build_player_uid/private_lock_player_uid
+    E->>FS: SavFile::save(全部改后文件)
+    E->>E: verify_roundtrip()  // 重读比对 + trailer 校验(R8)
+    alt 写回失败 / roundtrip 异常
+        E->>B: restore_world(world, active_backup_id)
+        B-->>FS: 还原整目录
+        E-->>FE: Err(已回滚 + 原因)
+    else 成功
+        E-->>FE: EditResult{ok:true, roundtrip_ok:true}
+    end
+    FE->>U: 提示「启动专用服，用原账号登录验证」
+
+%% ============ 4.2 跨服角色转移 transfer_character（P1） ============
+sequenceDiagram
+    actor U as 用户
+    participant FE as F5 视图
+    participant B as save_transfer.rs(F4)
+    participant E as save_edit.rs(F5)
+    participant FS as 文件系统
+    U->>FE: 选 源/目标世界 + 玩家 + 子集(L4)
+    FE->>B: backup_world(目标世界) + list_world_backups 取 id
+    FE->>E: transfer_character(TransferRequest)
+    E->>E: 断言停服 + 版本门控
+    E->>FS: 解析 源 Level.sav + 源 Players/<guid>.sav
+    E->>FS: 解析 目标 Level.sav
+    E->>E: 按 subset 拷贝 character/tech/inventory/pals
+    E->>E: 同世界→保留公会; 跨世界→公会留 P2(仅提示)
+    E->>E: GUID/实例ID 防碰撞 bump(≤1000, R9)
+    E->>FS: 写回 目标 Level.sav + Players/<newguid>.sav
+    E->>E: verify_roundtrip()
+    alt 失败
+        E->>B: restore_world(目标, id)
+        E-->>FE: Err(已回滚)
+    else 成功
+        E-->>FE: EditResult{ok:true}
+    end
+
+%% ============ 4.3 科技点编辑（P1，老板点名） ============
+sequenceDiagram
+    actor U as 用户
+    participant FE as F5 视图
+    participant B as save_transfer.rs(F4)
+    participant E as save_edit.rs(F5)
+    participant FS as 文件系统
+    U->>FE: 选 玩家 + 勾选 科技(批量 add/remove)
+    FE->>B: backup_world(world) + list_world_backups 取 id
+    FE->>E: edit_tech(TechEditRequest)
+    E->>E: 断言停服 + 版本门控
+    E->>FS: SavFile::load(Players/<guid>.sav)
+    E->>E: 定位 UnlockedRecipeTechnologyNames.values（字符串数组）
+    E->>E: add_assets append / remove_assets remove(asset)
+    E->>FS: SavFile::save(改后文件)
+    E->>E: verify_roundtrip()
+    alt 失败
+        E->>B: restore_world(world, id)
+        E-->>FE: Err(已回滚)
+    else 成功
+        E-->>FE: EditResult{ok:true}
+    end

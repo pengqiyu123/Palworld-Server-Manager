@@ -1,0 +1,100 @@
+classDiagram
+    class SavFile {
+        +GvasFile gvas
+        +CompressionFormat compression
+        +Vec~u8~ trailer
+        +load(path: &Path) Result~SavFile,String~
+        +save(path: &Path) Result~(),String~
+        +to_json() String
+        +verify_roundtrip() bool
+    }
+    class CompressionFormat {
+        <<enum>>
+        Zlib
+        Oodle
+        None
+    }
+    class PlayerEntry {
+        +String player_uid
+        +String instance_id
+        +String guid
+        +String nickname
+        +u32 level
+        +Option~String~ guild_id
+        +u32 pal_count
+        +String last_online
+        +bool is_host
+    }
+    class GuildEntry {
+        +String guild_id
+        +String name
+        +String admin_player_uid
+        +Vec~String~ players
+        +Vec~String~ handle_ids
+    }
+    class WorldSummary {
+        +String world_name
+        +Vec~PlayerEntry~ players
+        +Vec~GuildEntry~ guilds
+    }
+    class TransferSubset {
+        +bool character
+        +bool guild
+        +bool tech
+        +bool inventory
+        +bool pals
+        +bool appearance
+    }
+    class TransferRequest {
+        +String source_world
+        +String target_world
+        +Vec~String~ selected_players
+        +TransferSubset subset
+        +String strategy
+    }
+    class FixHostRequest {
+        +String world
+        +String old_host_guid
+        +String new_char_guid
+    }
+    class MigrateRequest {
+        +String source_world
+        +String target_world
+        +bool delete_world_option
+    }
+    class TechEditRequest {
+        +String world
+        +String player_guid
+        +Vec~String~ add_assets
+        +Vec~String~ remove_assets
+        +String mode
+    }
+    class PlayerAttrRequest {
+        +String world
+        +String player_guid
+        +Option~String~ rename
+        +Option~u32~ level
+        +bool max_all
+    }
+    class EditResult {
+        +bool ok
+        +String backup_id
+        +bool roundtrip_ok
+        +Vec~String~ warnings
+    }
+    class TechInfo {
+        +String name
+        +String asset
+        +String tech_type
+    }
+    SavFile --> CompressionFormat : uses
+    SavFile ..> PlayerEntry : parses into
+    WorldSummary o-- PlayerEntry
+    WorldSummary o-- GuildEntry
+    TransferRequest --> TransferSubset
+    TransferRequest ..> PlayerEntry : references
+    FixHostRequest ..> SavFile : mutates
+    MigrateRequest ..> SavFile : copies
+    TechEditRequest ..> PlayerEntry : targets
+    PlayerAttrRequest ..> PlayerEntry : targets
+    EditResult <.. SavFile : produced by ops

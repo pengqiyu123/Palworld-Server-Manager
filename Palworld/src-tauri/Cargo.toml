@@ -17,6 +17,8 @@ tauri-plugin-dialog = "2"
 tauri-plugin-clipboard-manager = "2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+gvas = "0.11"
+flate2 = "1.0"
 thiserror = "1.0"
 tokio = { version = "1.0", features = ["full"] }
 dirs = "5.0"
@@ -28,5 +30,12 @@ windows = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_System_Console",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
 ] }
 reqwest = { version = "0.12", features = ["json"] }
+
+# T1：vendored Oodle(Kraken) 解码器（MIT，纯 Rust），用于解码 .sav 的 PlM 压缩。
+# 源码见 crates/oozextract/，保留上游 LICENSE-MIT 以符合分发合规。
+oozextract = { path = "crates/oozextract" }

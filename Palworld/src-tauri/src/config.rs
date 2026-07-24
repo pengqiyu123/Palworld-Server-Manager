@@ -481,6 +481,106 @@ pub async fn get_default_config() -> Result<HashMap<String, String>, String> {
     Ok(default_config_map())
 }
 
+/// 一键填充默认配置的结果（前端 Toast 直接使用 message 字段）
+#[derive(Serialize, Clone)]
+pub struct FillConfigResult {
+    /// "already_filled" | "filled_from_template" | "filled_from_defaults"
+    pub status: String,
+    /// 实际命中/写入的来源路径或来源标识
+    pub source: String,
+    /// 面向用户的中文提示
+    pub message: String,
+}
+
+/// 一键填充默认配置（仅手动按钮触发，绝不接入 start_server 自动守卫）。
+///
+/// 四级策略：
+/// ① live 已含 `OptionSettings=(` → 跳过（already_filled）
+/// ② 模板 `DefaultPalWorldSettings.ini` 存在 → 先备份再复制（filled_from_template）
+/// ③ 模板缺失 → 用内置 `default_config_map()` 物化兜底（filled_from_defaults）
+/// ④ 两者皆无 → 明确报错，绝不静默（Err）
+///
+/// 路径仅 Windows 专用服：`{server_path}/Pal/.../WindowsServer/`
+#[command]
+pub async fn fill_default_config(server_path: String) -> Result<FillConfigResult, String> {
+    if server_path.trim().is_empty() {
+        return Err("未设置服务器路径（server_path 为空）。请到【设置】填写 PalServer.exe 所在根目录后再试。".into());
+    }
+    let live = PathBuf::from(&server_path)
+        .join("Pal").join("Saved").join("Config").join("WindowsServer").join("PalWorldSettings.ini");
+    let template = PathBuf::from(&server_path)
+        .join("Pal").join("Config").join("WindowsServer").join("DefaultPalWorldSettings.ini");
+
+    // ① 已填好（含 OptionSettings=( ）→ 跳过
+    if live.exists() {
+        if let Ok(content) = std::fs::read_to_string(&live) {
+            if content.contains("OptionSettings=(") {
+                return Ok(FillConfigResult {
+                    status: "already_filled".into(),
+                    source: live.to_string_lossy().into(),
+                    message: "PalWorldSettings.ini 已含配置，无需填充。".into(),
+                });
+            }
+        }
+    }
+
+    // ② 模板存在 → 先备份 live（若有），再复制模板
+    if template.exists() {
+        backup_existing_config(live.to_str().unwrap_or("")); // 复用 config.rs 既有备份逻辑
+        // 确保父目录存在（Pal/Saved/Config/WindowsServer/ 可能尚未创建），与三级分支一致
+        if let Some(parent) = live.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败: {}", e))?;
+            }
+        }
+        std::fs::copy(&template, &live).map_err(|e| format!("复制默认模板失败: {}", e))?;
+        return Ok(FillConfigResult {
+            status: "filled_from_template".into(),
+            source: template.to_string_lossy().into(),
+            message: "已从 DefaultPalWorldSettings.ini 填充 PalWorldSettings.ini，可正常开服。".into(),
+        });
+    }
+
+    // ③ 模板缺失 → 用内置默认值物化兜底
+    let map = default_config_map();
+    if !map.is_empty() {
+        let mut options: Vec<(String, String)> = map.into_iter().collect();
+        options.sort_by(|a, b| a.0.cmp(&b.0));
+        let lines: Vec<String> = options.into_iter().map(|(k, v)| format!("{}={}", k, v)).collect();
+        let content = format!("[ /Script/Pal.PalGameWorldSettings ]\nOptionSettings=({})\n", lines.join(","));
+        if let Some(parent) = live.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败: {}", e))?;
+            }
+        }
+        std::fs::write(&live, content).map_err(|e| format!("写入默认配置失败: {}", e))?;
+        return Ok(FillConfigResult {
+            status: "filled_from_defaults".into(),
+            source: "builtin default_config_map()".into(),
+            message: "未找到默认模板，已用内置默认值初始化 PalWorldSettings.ini。".into(),
+        });
+    }
+
+    // ④ 两者皆无 → 明确报错，绝不静默
+    Err("未找到默认配置模板 DefaultPalWorldSettings.ini，且内置默认值不可用。请确认 server_path 指向 PalServer 根目录。".into())
+}
+
+/// 只读探测：live 配置文件是否已初始化（含 `OptionSettings=(`）。
+/// 供前端「空白横幅」判断显隐，不写盘。
+#[command]
+pub async fn is_config_initialized(server_path: String) -> Result<bool, String> {
+    if server_path.trim().is_empty() {
+        return Ok(false);
+    }
+    let live = PathBuf::from(&server_path)
+        .join("Pal").join("Saved").join("Config").join("WindowsServer").join("PalWorldSettings.ini");
+    if !live.exists() {
+        return Ok(false);
+    }
+    let content = std::fs::read_to_string(&live).map_err(|e| format!("读取配置文件失败: {}", e))?;
+    Ok(content.contains("OptionSettings=("))
+}
+
 #[command]
 pub async fn get_config_descriptions() -> Result<Vec<ConfigValue>, String> {
     Ok(vec![
@@ -624,5 +724,136 @@ mod tests {
         assert_eq!(pw, "");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ====== fill_default_config / is_config_initialized 单元测试（T4 收官 · 严过关）======
+
+    /// 构造临时 server_path 目录起点（含唯一子目录，避免并行测试互相干扰），调用方负责清理。
+    fn make_qa_server_path(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("pwqa_{}_{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir); // 确保干净起点
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 拼接 live 配置文件路径（与 fill_default_config 内部一致）
+    fn qa_live_path(sp: &std::path::Path) -> std::path::PathBuf {
+        sp.join("Pal").join("Saved").join("Config").join("WindowsServer").join("PalWorldSettings.ini")
+    }
+
+    #[test]
+    fn fill_level_1_already_filled_does_not_write() {
+        // ① live 已含 OptionSettings=( → already_filled，且不写盘
+        let sp = make_qa_server_path("lvl1");
+        let ws = sp.join("Pal").join("Saved").join("Config").join("WindowsServer");
+        std::fs::create_dir_all(&ws).unwrap();
+        let live = ws.join("PalWorldSettings.ini");
+        let preset = "[/Script/Pal.PalGameWorldSettings]\nOptionSettings=(Difficulty=None,ServerName=\"X\")\n";
+        std::fs::write(&live, preset).unwrap();
+        let mtime_before = std::fs::metadata(&live).unwrap().modified().unwrap();
+
+        let res = tauri::async_runtime::block_on(fill_default_config(sp.to_string_lossy().into()))
+            .expect("level1 不应报错");
+        assert_eq!(res.status, "already_filled");
+        // 关键：不得改写已填充的 live（内容不变 + mtime 不变）
+        assert_eq!(std::fs::read_to_string(&live).unwrap(), preset, "live 内容被意外改写");
+        assert_eq!(
+            std::fs::metadata(&live).unwrap().modified().unwrap(),
+            mtime_before,
+            "fill_default_config 不应触碰已填充的 live（mtime 变化）"
+        );
+
+        let _ = std::fs::remove_dir_all(&sp);
+    }
+
+    #[test]
+    fn fill_level_2_from_template() {
+        // ② 模板存在 → 复制模板 → filled_from_template
+        // （备份既有 live 的行为见实现，为避免污染真实 AppData 备份目录，此处不预置旧 live 断言）
+        let sp = make_qa_server_path("lvl2");
+        let tpl_dir = sp.join("Pal").join("Config").join("WindowsServer");
+        std::fs::create_dir_all(&tpl_dir).unwrap();
+        let tpl = tpl_dir.join("DefaultPalWorldSettings.ini");
+        let tpl_content = "[/Script/Pal.PalGameWorldSettings]\nOptionSettings=(Difficulty=Hardcore,ServerName=\"Tpl\")\n";
+        std::fs::write(&tpl, tpl_content).unwrap();
+
+        let res = tauri::async_runtime::block_on(fill_default_config(sp.to_string_lossy().into()))
+            .expect("level2 不应报错");
+        assert_eq!(res.status, "filled_from_template");
+
+        let live = qa_live_path(&sp);
+        assert!(live.exists(), "应从模板复制生成 live");
+        assert_eq!(std::fs::read_to_string(&live).unwrap(), tpl_content, "live 内容应与模板一致");
+
+        let _ = std::fs::remove_dir_all(&sp);
+    }
+
+    #[test]
+    fn fill_level_3_from_defaults() {
+        // ③ 模板缺失 → 用内置 default_config_map() 物化兜底 → filled_from_defaults
+        // 注意：default_config_map() 为硬编码非空，故「无模板的空目录」会走此分支而非 ④ 的 Err
+        // （④ 仅 server_path 为空时可达）。此即 QA 任务中 ④「指向无模板的空目录」的实际正确落点。
+        let sp = make_qa_server_path("lvl3");
+        // 不创建模板，确保无 DefaultPalWorldSettings.ini
+        let res = tauri::async_runtime::block_on(fill_default_config(sp.to_string_lossy().into()))
+            .expect("level3 不应报错");
+        assert_eq!(res.status, "filled_from_defaults");
+
+        let live = qa_live_path(&sp);
+        assert!(live.exists(), "应已物化写入 live");
+        let got = std::fs::read_to_string(&live).unwrap();
+        assert!(got.contains("OptionSettings=("), "写入内容应含 OptionSettings=(");
+        assert!(got.contains("Difficulty=None"), "写入内容应含内置默认值");
+
+        let _ = std::fs::remove_dir_all(&sp);
+    }
+
+    #[test]
+    fn fill_level_4_empty_server_path_errors() {
+        // ④ server_path 为空 → 明确 Err，绝不静默
+        let res = tauri::async_runtime::block_on(fill_default_config("".to_string()));
+        assert!(res.is_err(), "server_path 为空必须明确报错，不能静默");
+        // 避免依赖 FillConfigResult: Debug（生产结构体未 derive Debug），用 match 取 Err 信息
+        let msg = match res {
+            Err(m) => m,
+            Ok(_) => panic!("server_path 为空必须返回 Err，不能静默"),
+        };
+        assert!(msg.contains("server_path"), "错误信息应指明 server_path 为空: {}", msg);
+    }
+
+    #[test]
+    fn is_config_initialized_empty_path_false() {
+        let res = tauri::async_runtime::block_on(is_config_initialized("".to_string())).unwrap();
+        assert!(!res, "空 server_path 应返回 false");
+    }
+
+    #[test]
+    fn is_config_initialized_missing_file_false() {
+        let sp = make_qa_server_path("ici_missing");
+        let res = tauri::async_runtime::block_on(is_config_initialized(sp.to_string_lossy().into())).unwrap();
+        assert!(!res, "live 文件不存在应返回 false");
+        let _ = std::fs::remove_dir_all(&sp);
+    }
+
+    #[test]
+    fn is_config_initialized_no_option_settings_false() {
+        let sp = make_qa_server_path("ici_noopt");
+        let ws = sp.join("Pal").join("Saved").join("Config").join("WindowsServer");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("PalWorldSettings.ini"), "[/Script/Pal.PalGameWorldSettings]\nFoo=Bar\n").unwrap();
+        let res = tauri::async_runtime::block_on(is_config_initialized(sp.to_string_lossy().into())).unwrap();
+        assert!(!res, "文件存在但不含 OptionSettings=( 应返回 false");
+        let _ = std::fs::remove_dir_all(&sp);
+    }
+
+    #[test]
+    fn is_config_initialized_with_option_settings_true() {
+        let sp = make_qa_server_path("ici_ok");
+        let ws = sp.join("Pal").join("Saved").join("Config").join("WindowsServer");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("PalWorldSettings.ini"), "[/Script/Pal.PalGameWorldSettings]\nOptionSettings=(Difficulty=None)\n").unwrap();
+        let res = tauri::async_runtime::block_on(is_config_initialized(sp.to_string_lossy().into())).unwrap();
+        assert!(res, "文件存在且含 OptionSettings=( 应返回 true");
+        let _ = std::fs::remove_dir_all(&sp);
     }
 }

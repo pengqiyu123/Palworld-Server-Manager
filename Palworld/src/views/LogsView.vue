@@ -4,7 +4,7 @@
       <div>
         <div class="page-title">实时日志</div>
         <div class="page-sub">
-          服务器 stdout 实时流。朋友连入、世界保存、报错都会在下方留下 [LOG] 行。
+          服务器控制台实时流。朋友连入、世界保存、报错都会在下方留下日志行。
         </div>
       </div>
       <div class="page-actions">
@@ -30,6 +30,10 @@
     <div v-else-if="source === 'cmd'" class="src-banner ok">
       <AppIcon name="info" :size="16" />
       <span>Cmd 模式：日志可用（PalServer-Win64-Shipping-Cmd.exe 标准输出已接入）。</span>
+    </div>
+    <div v-else-if="source === 'console'" class="src-banner ok">
+      <AppIcon name="info" :size="16" />
+      <span>服务器控制台已接入；黑色日志窗口已隐藏。</span>
     </div>
 
     <!-- 日志面板 -->
@@ -61,7 +65,7 @@ import AppIcon from '@/components/ui/AppIcon.vue'
  * 实时日志面板（收官 M3-B · ★D4）。
  * - 挂载时先调 get_server_logs 拉一次全量（最多 500 行），
  *   之后走 listen('server-log') 流式 append，前端 500 行环形缓冲。
- * - listen('server-log-source') 拿到 "cmd" | "wrapper"：
+ * - listen('server-log-source') 拿到 "console" | "wrapper"：
  *   wrapper 模式顶部显示「日志不可用」横条。
  * - 提供 暂停 / 清空 / 自动滚动 等基础交互。
  */

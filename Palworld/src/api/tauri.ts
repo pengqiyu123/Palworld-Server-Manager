@@ -8,11 +8,21 @@ import type {
   AppSettings,
   PresetMeta,
   BackupInfo,
+  FillConfigResult,
   ServerInfo,
   ServerMetrics,
   PlayerInfo,
   DiscoverResult,
+  WorldInfo,
   WorldBackupInfo,
+  WorldSummary,
+  EditResult,
+  TechInfo,
+  FixHostRequest,
+  MigrateRequest,
+  TransferRequest,
+  TechEditRequest,
+  PlayerAttrRequest,
 } from '@/types/tauri'
 
 /**
@@ -22,9 +32,12 @@ import type {
  * Tauri 的 invoke 在出错时 reject 的值通常是字符串，
  * 也可能是 { message: string } 形式的对象；本函数将其归一为 Error。
  */
-async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+async function tauriInvoke<T>(
+  cmd: string,
+  args?: Record<string, unknown> | object,
+): Promise<T> {
   try {
-    return await invoke<T>(cmd, args)
+    return await invoke<T>(cmd, args as Record<string, unknown> | undefined)
   } catch (err) {
     if (typeof err === 'string') {
       throw new Error(err)
@@ -43,11 +56,12 @@ async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Prom
  * 单词参数（path/port/name 等）两种风格一致；多词参数使用 camelCase（如 serverPath）。
  */
 export const api = {
-  // === server.rs (7 个) ===
+  // === server.rs (8 个) ===
   server: {
-    init: () => tauriInvoke<ServerStatus>('init_server_state'),
+    init: (path: string) => tauriInvoke<ServerStatus>('init_server_state', { path }),
     start: (path: string) => tauriInvoke<ServerStatus>('start_server', { path }),
     stop: () => tauriInvoke<ServerStatus>('stop_server'),
+    forceStop: () => tauriInvoke<ServerStatus>('force_stop_server'),
     getStatus: () => tauriInvoke<ServerStatus>('get_server_status'),
     getLogs: () => tauriInvoke<string[]>('get_server_logs'),
     clearLogs: () => tauriInvoke<void>('clear_server_logs'),
@@ -73,6 +87,12 @@ export const api = {
     // 恢复指定备份到 server_path 下的配置文件
     restoreBackup: (name: string, serverPath: string) =>
       tauriInvoke<string>('restore_config_backup', { name, serverPath }),
+    // 一键填充默认配置（仅手动按钮触发，不接入 start_server 自动守卫）
+    fillDefault: (serverPath: string) =>
+      tauriInvoke<FillConfigResult>('fill_default_config', { serverPath }),
+    // 只读探测：live 配置是否已初始化（含 OptionSettings=( ），供空白横幅判断
+    isInitialized: (serverPath: string) =>
+      tauriInvoke<boolean>('is_config_initialized', { serverPath }),
   },
 
   // === firewall.rs (2 个) ===
@@ -115,23 +135,57 @@ export const api = {
 
   // === save_transfer.rs (6 个 · 收官 F4 存档/角色转移 MVP) ===
   save: {
-    /** 扫描 SaveGames 下含 Level.sav 的世界列表（自动发现存档根，回报路径）。 */
-    discoverWorlds: () => tauriInvoke<DiscoverResult>('discover_worlds'),
-    /** 整目录备份世界到备份夹（默认 <SaveGames>/_backups/<world>/<timestamp>/）。 */
-    backupWorld: (worldName: string, dest?: string) =>
-      tauriInvoke<string>('backup_world', { worldName, dest }),
+    /** 扫描 SaveGames 下含 Level.sav 的世界列表（自动发现存档根，回报路径）。
+     *  `extraRoot` 为「手动选目录」兜底：作为额外扫描根合并去重（与单机一致）。 */
+    discoverWorlds: (extraRoot?: string) =>
+      tauriInvoke<DiscoverResult>('discover_worlds', extraRoot != null ? { extraRoot } : undefined),
+    /** R5：扫描本机单机（Steam 库 + AppData）存档，返回 WorldInfo 列表，无档返回空数组。
+     *  `extraRoot` 为「手动选目录」兜底：作为额外扫描根合并去重。 */
+    discoverLocalWorlds: (extraRoot?: string) =>
+      tauriInvoke<WorldInfo[]>('discover_local_worlds', extraRoot != null ? { extraRoot } : undefined),
+    /** 整目录备份世界到备份夹（默认 <世界同级>/_backups/<world>/<timestamp>/；dest 为自定义存放目录）。 */
+    backupWorld: (worldPath: string, dest?: string) =>
+      tauriInvoke<string>('backup_world', { worldPath, dest }),
     /** 列出某世界的已有备份。 */
-    listWorldBackups: (worldName: string) =>
-      tauriInvoke<WorldBackupInfo[]>('list_world_backups', { worldName }),
+    listWorldBackups: (worldPath: string) =>
+      tauriInvoke<WorldBackupInfo[]>('list_world_backups', { worldPath }),
     /** 把备份整体覆盖回当前世界目录（UI 侧需二次确认 + 提醒先停服）。 */
-    restoreWorld: (worldName: string, backupId: string) =>
-      tauriInvoke<string>('restore_world', { worldName, backupId }),
+    restoreWorld: (worldPath: string, backupId: string) =>
+      tauriInvoke<string>('restore_world', { worldPath, backupId }),
+    /** 从用户指定的自定义备份目录整体覆盖回当前世界目录（指定文件夹存放场景）。 */
+    restoreWorldFrom: (worldPath: string, src: string) =>
+      tauriInvoke<string>('restore_world_from', { worldPath, src }),
     /** 导出单个角色存档到指定路径（保持 <steam_id>.sav）。 */
     exportCharacter: (worldName: string, steamId: string, destPath: string) =>
       tauriInvoke<string>('export_character', { worldName, steamId, destPath }),
     /** 导入角色存档（保持 steam_id 不变，覆盖同名文件）。 */
     importCharacter: (worldName: string, steamId: string, srcPath: string) =>
       tauriInvoke<string>('import_character', { worldName, steamId, srcPath }),
+  },
+
+  // === save_edit.rs (F5 · 存档迁移/改写 MVP，独立命名空间，不触碰 F4) ===
+  migration: {
+    /** 解析世界玩家/公会列表（L1–L3）。 */
+    worldSummary: (worldName: string) =>
+      tauriInvoke<WorldSummary>('f5_world_summary', { worldName }),
+    /** 按真实世界目录路径解析玩家/公会列表（本地单机 / 服务器通用）。 */
+    worldSummaryByPath: (path: string) =>
+      tauriInvoke<WorldSummary>('f5_world_summary_by_path', { path }),
+    /** 科技名↔asset 列表（来自 vendored world_data.json）。 */
+    techList: () => tauriInvoke<TechInfo[]>('f5_tech_list'),
+    /** Fix Host Save：旧主机角色 ↔ 新角色 UID 互换（灵魂步骤）。 */
+    fixHostSave: (req: FixHostRequest) => tauriInvoke<EditResult>('fix_host_save', req),
+    /** 整包世界迁移（文件级拷贝 + WorldOption/DedicatedServerName 提示）。 */
+    migrateWorld: (req: MigrateRequest) =>
+      tauriInvoke<EditResult>('migrate_world_to_server', req),
+    /** 跨服角色转移（按 L4 子集）。 */
+    transferCharacter: (req: TransferRequest) =>
+      tauriInvoke<EditResult>('transfer_character', req),
+    /** 科技点解锁/移除（单项 + 批量）。 */
+    editTech: (req: TechEditRequest) => tauriInvoke<EditResult>('edit_tech', req),
+    /** 玩家基础属性（改名/等级/Max All）。 */
+    editPlayerAttr: (req: PlayerAttrRequest) =>
+      tauriInvoke<EditResult>('edit_player_attr', req),
   },
 
   // === settings.rs (2 个) ===

@@ -14,6 +14,10 @@ use tauri::command;
 
 /// Radmin VPN 候选安装路径（按常见度排序探测，找到第一个存在的即返回）。
 const RADMIN_CANDIDATE_PATHS: &[&str] = &[
+    r"C:\Program Files\Radmin VPN\RvRvpnGui.exe",
+    r"C:\Program Files (x86)\Radmin VPN\RvRvpnGui.exe",
+    r"C:\Program Files\Radmin VPN\Radmin.exe",
+    r"C:\Program Files (x86)\Radmin VPN\Radmin.exe",
     r"C:\Program Files\Radmin VPN\RadminVPN.exe",
     r"C:\Program Files (x86)\Radmin VPN\RadminVPN.exe",
     r"C:\Program Files\Famatech\Radmin VPN\RadminVPN.exe",
@@ -34,36 +38,59 @@ fn find_radmin_exe() -> Option<String> {
 /// F2 · 启动 Radmin VPN（仅拉起应用，不接管"加入网络"）。
 #[command]
 pub async fn launch_radmin_vpn() -> Result<String, String> {
-    let exe = find_radmin_exe().ok_or_else(|| "未找到 Radmin VPN，请确认已安装".to_string())?;
+    let exe = find_radmin_exe().ok_or_else(|| {
+        "未找到 Radmin VPN，请确认已安装（默认路径为 C:\\Program Files (x86)\\Radmin VPN\\Radmin.exe）"
+            .to_string()
+    })?;
     Command::new(&exe)
         .spawn()
         .map_err(|e| format!("启动 Radmin VPN 失败: {}", e))?;
     Ok("已启动 Radmin VPN".to_string())
 }
 
-/// Palworld 候选可执行文件路径（按常见度排序探测）。
-/// 老板默认盘 E:\SteamLibrary，外加通用 Steam 库相对路径兜底。
+/// 在已发现的 Steam 库中查找 Palworld 本体，不依赖固定盘符。
 fn find_palworld_exe() -> Option<String> {
-    const CANDIDATES: [&str; 4] = [
-        r"E:\SteamLibrary\steamapps\common\Palworld\Pal\Binaries\Win64\Palworld-Win64-Shipping.exe",
-        r"E:\Steam\steamapps\common\Palworld\Pal\Binaries\Win64\Palworld-Win64-Shipping.exe",
-        r"D:\SteamLibrary\steamapps\common\Palworld\Pal\Binaries\Win64\Palworld-Win64-Shipping.exe",
-        r"C:\Program Files (x86)\Steam\steamapps\common\Palworld\Pal\Binaries\Win64\Palworld-Win64-Shipping.exe",
-    ];
-    for path in CANDIDATES {
-        if Path::new(path).exists() {
-            return Some(path.to_string());
+    for root in crate::steam_detect::detect_steam_library_roots() {
+        let path = root
+            .join("steamapps")
+            .join("common")
+            .join("Palworld")
+            .join("Pal")
+            .join("Binaries")
+            .join("Win64")
+            .join("Palworld-Win64-Shipping.exe");
+        if path.is_file() {
+            return Some(path.to_string_lossy().to_string());
         }
     }
     None
+}
+
+/// 检查 Steam 客户端是否正在运行（通过 tasklist 查询 steam.exe 进程）。
+/// tasklist 在所有 Windows 版本上均可用；/FO CSV + /NH 输出无表头的 CSV 便于精确匹配。
+fn is_steam_running() -> bool {
+    Command::new("tasklist")
+        .args(["/FI", "IMAGENAME eq steam.exe", "/FO", "CSV", "/NH"])
+        .output()
+        .map(|o| {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            stdout.lines().any(|line| line.to_lowercase().contains("steam.exe"))
+        })
+        .unwrap_or(false)
 }
 
 /// F3 · 启动游戏本体。
 /// 优先：`cmd /c start "" steam://rungame/1623730`（老板拥有正版，AppID 1623730）。
 /// 兜底：从 Steam 库探测 Palworld.exe 直接拉起。
 /// 再兜底：若两者均失败，返回明确中文错误。
+///
+/// 诚实反馈：spawn 成功不代表游戏会起——若 Steam 未在运行，
+/// steam:// 协议可能无法拉起游戏，故先检测 Steam 进程状态再决定返回 Ok 还是 Err。
 #[command]
 pub async fn launch_game() -> Result<String, String> {
+    // 先检测 Steam 是否在运行（spawn 前），用于诚实反馈。
+    let steam_running = is_steam_running();
+
     // 优先：通过 Steam 协议拉起。空标题 "" 避免 start 把含 ":" 的 URL 误判为窗口标题。
     let steam_ok = Command::new("cmd")
         .args(["/c", "start", "", "steam://rungame/1623730"])
@@ -71,7 +98,15 @@ pub async fn launch_game() -> Result<String, String> {
         .is_ok();
 
     if steam_ok {
-        return Ok("已通过 Steam 启动游戏（steam://rungame/1623730）".to_string());
+        if steam_running {
+            return Ok("已通过 Steam 启动游戏（steam://rungame/1623730）".to_string());
+        } else {
+            // spawn 成功但 Steam 未运行——steam:// 协议可能无法拉起游戏，诚实告知。
+            return Err(
+                "已发送启动指令，但检测到 Steam 未运行。请先启动 Steam 客户端，再点击此按钮"
+                    .to_string(),
+            );
+        }
     }
 
     // 兜底：从 Steam 库探测 Palworld.exe 直接拉起。
@@ -87,4 +122,23 @@ pub async fn launch_game() -> Result<String, String> {
         "未找到 Palworld 可执行文件，且 Steam 协议启动失败，请确认已安装 Steam 版幻兽帕鲁"
             .to_string(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn radmin_candidates_cover_the_standard_radmin_executable() {
+        assert!(
+            RADMIN_CANDIDATE_PATHS
+                .iter()
+                .any(|path| path.ends_with(r"Radmin VPN\Radmin.exe"))
+        );
+    }
+
+    #[test]
+    fn radmin_candidates_prefer_the_vpn_gui() {
+        assert!(RADMIN_CANDIDATE_PATHS[0].ends_with(r"Radmin VPN\RvRvpnGui.exe"));
+    }
 }

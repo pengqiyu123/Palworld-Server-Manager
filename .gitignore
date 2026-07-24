@@ -7,6 +7,8 @@ node_modules/
 dist/
 dist-verify/
 .build-s1-verify/
+.build-verify/
+.build_qa_verify/
 target/
 src-tauri/target/
 *.tsbuildinfo

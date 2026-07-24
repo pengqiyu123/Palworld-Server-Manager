@@ -3,6 +3,7 @@ mod firewall;
 mod launcher;
 mod network;
 mod save_transfer;
+mod save_edit;
 mod presets;
 mod rcon;
 mod rest_proxy;
@@ -45,6 +46,7 @@ pub fn run() {
         })
         .manage(ServerState {
             process: Mutex::new(None),
+            external_pid: Mutex::new(None),
             server_path: Mutex::new(String::new()),
             logs: Arc::new(Mutex::new(Vec::new())),
         })
@@ -54,18 +56,25 @@ pub fn run() {
             #[allow(deprecated)]
             tauri::generate_handler![
                 server::init_server_state, server::start_server, server::stop_server,
+                server::force_stop_server,
                 server::get_server_status, server::get_server_logs, server::clear_server_logs,
                 server::export_server_logs,
                 config::read_config, config::write_config, config::get_default_config,
                 config::get_config_descriptions, config::list_config_backups,
                 config::restore_config_backup,
+                config::fill_default_config, config::is_config_initialized,
                 firewall::check_firewall_rules, firewall::add_firewall_rules,
                 network::check_port_usage, network::check_radmin_lan_status,
                 network::check_radmin_readiness,
                 launcher::launch_radmin_vpn, launcher::launch_game,
-                save_transfer::discover_worlds, save_transfer::backup_world,
-                save_transfer::list_world_backups, save_transfer::restore_world,
+                save_transfer::discover_worlds, save_transfer::discover_local_worlds,
+                save_transfer::backup_world,
+                save_transfer::list_world_backups, save_transfer::restore_world, save_transfer::restore_world_from,
                 save_transfer::export_character, save_transfer::import_character,
+                save_edit::f5_world_summary, save_edit::f5_world_summary_by_path, save_edit::f5_tech_list,
+                save_edit::fix_host_save, save_edit::migrate_world_to_server,
+                save_edit::transfer_character, save_edit::edit_tech,
+                save_edit::edit_player_attr,
                 rcon::rcon_connect, rcon::rcon_send_command, rcon::rcon_disconnect,
                 rcon::rcon_is_connected, rcon::rcon_connect_using_config,
                 settings::load_app_settings, settings::save_app_settings,

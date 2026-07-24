@@ -8,6 +8,9 @@
         </div>
       </div>
       <div class="page-actions">
+        <button class="btn btn-ghost" :disabled="saving" @click="onFillDefault">
+          一键填充默认配置
+        </button>
         <button class="btn btn-primary" :disabled="configStore.dirtyCount === 0 || saving" @click="onSave">
           {{ saving ? '保存中…' : '保存配置' }}
         </button>
@@ -23,11 +26,17 @@
       <span>服务器正在运行，修改配置后需重启服务器才能生效。</span>
     </div>
 
+    <div v-else-if="isFirstTime" class="cfg-warning">
+      <AppIcon name="info" :size="16" />
+      <span>首次配置：填写完成并保存后会返回概览页启动服务器。</span>
+    </div>
+
     <!-- AdminPassword 专属区 -->
     <div class="admin-pw-section">
       <div class="apw-head">
         <span class="apw-title">管理员密码 (AdminPassword)</span>
         <span class="apw-tag">REST/RCON 认证用</span>
+        <InfoTip :html="adminPasswordTip" />
       </div>
       <div class="apw-body">
         <div class="apw-input-row">
@@ -40,7 +49,7 @@
           <button class="btn btn-ghost btn-sm" @click="showPw = !showPw">
             {{ showPw ? '隐藏' : '显示' }}
           </button>
-          <button class="btn btn-ghost btn-sm" @click="onCopyPw">复制</button>
+          <button class="btn btn-ghost btn-sm" :disabled="!adminPasswordDisplay.trim()" @click="onCopyPw">复制</button>
           <button class="btn btn-primary btn-sm" @click="onEditPw">修改</button>
         </div>
         <div class="apw-hint">
@@ -114,14 +123,17 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, nextTick } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useConfigStore } from '@/stores/config'
 import { useSettingsStore } from '@/stores/settings'
 import { useServerStore } from '@/stores/server'
 import { useToast } from '@/components/ui/useToast'
+import { api } from '@/api/tauri'
 import AppIcon from '@/components/ui/AppIcon.vue'
 import CfgGroup from '@/components/ui/CfgGroup.vue'
 import CfgItem from '@/components/ui/CfgItem.vue'
 import ConfirmDialog from '@/components/ui/ConfirmDialog.vue'
+import InfoTip from '@/components/ui/InfoTip.vue'
 
 type Editable = 'number' | 'select' | 'toggle' | 'text'
 
@@ -150,6 +162,9 @@ const configStore = useConfigStore()
 const settingsStore = useSettingsStore()
 const serverStore = useServerStore()
 const toast = useToast()
+const route = useRoute()
+const router = useRouter()
+const isFirstTime = computed(() => route.query.firstTime === 'true')
 
 const saving = ref(false)
 const search = ref('')
@@ -175,22 +190,25 @@ const adminPasswordDisplay = computed(() => {
 })
 
 function onCopyPw(): void {
-  const pw = adminPasswordDisplay.value
-  if (!pw) {
+  const raw = adminPasswordDisplay.value.trim()
+  if (!raw) {
     toast.warning('管理员密码为空')
     return
   }
+  // 去引号后拼接斜杠指令（写纯密码改为 /AdminPassword <密码>）
+  const pw = raw.replace(/^"|"$/g, '')
+  const cmd = `/AdminPassword ${pw}`
   try {
-    navigator.clipboard.writeText(pw)
-    toast.success('密码已复制到剪贴板')
+    navigator.clipboard.writeText(cmd)
+    toast.success('管理员指令已复制，粘贴到游戏聊天框回车即可获管理员权限')
   } catch {
     const textarea = document.createElement('textarea')
-    textarea.value = pw
+    textarea.value = cmd
     document.body.appendChild(textarea)
     textarea.select()
     try {
       document.execCommand('copy')
-      toast.success('密码已复制到剪贴板')
+      toast.success('管理员指令已复制，粘贴到游戏聊天框回车即可获管理员权限')
     } catch {
       toast.error('复制失败')
     }
@@ -202,6 +220,33 @@ function onEditPw(): void {
   pwBuffer.value = adminPasswordDisplay.value
   editingPw.value = true
   nextTick(() => pwInputRef.value?.focus())
+}
+
+// ====== R4 · 配置项 ⓘ 简介（来自后端 get_config_descriptions）======
+const descriptions = ref<Map<string, string>>(new Map())
+
+// description 缺失时的兜底文案（代码未列的选项用 web 标准文档补充，写前端常量）
+const FALLBACK_DESC: Record<string, string> = {
+  ServerName: '服务器在列表中显示的名称。',
+  ServerDescription: '服务器描述信息。',
+  ServerPassword: '玩家进服密码（局域网可留空）。',
+  ServerPlayerMaxNum: '服务器同时最多容纳的玩家数（上限 32）。',
+  AdminPassword: '用于 REST API / RCON 认证（不是游戏进服密码）。',
+}
+
+const adminPasswordTip = computed(() => {
+  const base = descriptions.value.get('AdminPassword') || FALLBACK_DESC['AdminPassword']
+  return `${base}<br><br>复制按钮生成 <code>/AdminPassword &lt;密码&gt;</code> 可直接在游戏聊天框回车认证。`
+})
+
+// 把后端 descriptions 接到每个配置项的 tip（CfgItem 已用 InfoTip 渲染 tip-html）
+function applyDescriptions(): void {
+  for (const g of groups) {
+    for (const it of g.items) {
+      const desc = descriptions.value.get(it.key)
+      it.tip = desc && desc.trim() ? desc : (it.tip || FALLBACK_DESC[it.key] || '')
+    }
+  }
 }
 
 function commitPw(): void {
@@ -322,6 +367,9 @@ async function doSave(): Promise<void> {
   try {
     await configStore.save()
     toast.success('配置已保存')
+    if (isFirstTime.value) {
+      await router.push('/overview')
+    }
   } catch (e) {
     toast.error(`保存失败: ${e instanceof Error ? e.message : String(e)}`)
   } finally {
@@ -334,8 +382,37 @@ function onCancel(): void {
   toast.info('已撤销所有修改')
 }
 
+// ====== 一键填充默认配置（仅手动触发，绝不接入 start_server 自动守卫）======
+async function onFillDefault(): Promise<void> {
+  const serverPath = settingsStore.settings.server_path
+  if (!serverPath) {
+    toast.warning('尚未设置服务器路径，请先到【设置】填写 PalServer 根目录')
+    return
+  }
+  saving.value = true
+  try {
+    const res = await api.config.fillDefault(serverPath)
+    toast.success(res.message)
+    if (isFirstTime.value) {
+      await router.push('/overview')
+    }
+  } catch (e) {
+    toast.error(`填充默认配置失败: ${e instanceof Error ? e.message : String(e)}`)
+  } finally {
+    saving.value = false
+  }
+}
+
 // ====== 加载配置 ======
 onMounted(async () => {
+  // R4：拉取配置项描述，构建 name→description 索引并接到每个配置项 ⓘ
+  try {
+    const descs = await api.config.getDescriptions()
+    descriptions.value = new Map(descs.map((d) => [d.name, d.description]))
+    applyDescriptions()
+  } catch (e) {
+    toast.error(`加载配置描述失败: ${e instanceof Error ? e.message : String(e)}`)
+  }
   const configPath = settingsStore.settings.config_path ||
     settingsStore.computeConfigPath(settingsStore.settings.server_path)
   if (configPath) {
