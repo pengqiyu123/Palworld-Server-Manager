@@ -41,7 +41,7 @@ cargo test --all-targets
 - `Palworld/src/`：Vue 前端、Pinia 状态和 Tauri 类型化调用。
 - `Palworld/src-tauri/src/`：服务器、REST、备份、迁移与修改器后端。
 - `Palworld/tests/`、`Palworld/src-tauri/tests/`：前端和 Rust 集成测试。
-- `docs/`、`Palworld/docs/`：存档格式、迁移设计、竞品和开发记录。
+- `docs/`：产品、架构、存档研究、发布记录及历史归档；从 `docs/README.md` 开始阅读。
 - `reference-projects/`：本地研究资料，已忽略且不会上传。
 
 ## 许可证

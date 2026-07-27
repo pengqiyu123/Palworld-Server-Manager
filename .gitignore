@@ -48,3 +48,8 @@ ui-redesign/
 
 # ===================== Rust 备份 =====================
 **/*.rs.bk
+
+# ===================== 本地工作笔记 / 非标准包管理器产物 =====================
+/1.md
+/Palworld/pnpm-lock.yaml
+/Palworld/pnpm-workspace.yaml

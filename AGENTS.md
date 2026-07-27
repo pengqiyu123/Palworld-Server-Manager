@@ -4,7 +4,7 @@
 
 `Palworld/` contains the production desktop application. Its Vue 3 UI lives in `Palworld/src/`: views belong in `views/`, reusable UI in `components/`, application state in `stores/`, and typed Tauri calls in `api/tauri.ts` with matching definitions in `types/tauri.ts`. The Rust/Tauri backend is under `Palworld/src-tauri/src/`; keep commands grouped by domain such as `server.rs`, `config.rs`, and `rcon.rs`.
 
-Frontend tests are in `Palworld/tests/`. Product, architecture, and research documents are in `docs/` and `Palworld/docs/`. The prototype folders at the repository root are references, not the deployed application.
+Frontend tests are in `Palworld/tests/`. Product, architecture, research, release, and historical documents are under `docs/`; begin with `docs/README.md`. The production application is the sole deployable codebase in this repository.
 
 ## Build, Test, and Development Commands
 
