@@ -10,15 +10,15 @@ import { useSettingsStore } from '@/stores/settings'
  *
  * 管理三层状态：
  * 1. 进程状态（status）— 来自 Rust server.rs 的 init/start/stop/getStatus
- * 2. REST 数据（serverInfo / serverMetrics / players）— 来自 60s 轮询 rest_proxy
+ * 2. REST 数据（serverInfo / serverMetrics / players）— 来自 3s 轮询 rest_proxy
  * 3. 日志（logs）— 来自 server-log 事件流
  *
- * 60s 轮询引擎：startPolling → 立即 pollOnce → setInterval(60s)。
- * 轮询失败自动 stopPolling + refreshStatus；server-status-change 事件也自动 stopPolling。
+ * 3s 轮询引擎：在线/离线都持续检查进程；端口就绪时读取 REST 实时数据。
  */
 export const useServerStore = defineStore('server', () => {
   const status = ref<ServerStatus>({
     running: false,
+    ready: false,
     pid: null,
     managed_by_app: false,
     server_path: '',
@@ -29,18 +29,25 @@ export const useServerStore = defineStore('server', () => {
   const logSource = ref<string | null>(null)
   const loading = ref(false)
 
-  // REST 数据（60s 轮询刷新）
+  // REST 数据（3s 轮询刷新）
   const serverInfo = ref<ServerInfo | null>(null)
   const serverMetrics = ref<ServerMetrics | null>(null)
   const players = ref<PlayerInfo[]>([])
+  const playersState = ref<'idle' | 'loading' | 'live' | 'error'>('idle')
+  const playersError = ref<string | null>(null)
+  const playersLastUpdatedAt = ref<Date | null>(null)
+  const liveDataRefreshing = ref(false)
+  const lastCheckedAt = ref<Date | null>(null)
 
   // 全局事件监听取消函数（log + status-change + log-source）
   let unlistenLog: (() => void) | null = null
   let unlistenStatus: (() => void) | null = null
   let unlistenLogSource: (() => void) | null = null
 
-  // 轮询定时器 ID（null = 未轮询）
+  // 全局实时监控：离线时也持续运行，以发现从管理器外部启动的服务器。
   let pollTimer: number | null = null
+  let pollInFlight = false
+  const LIVE_POLL_INTERVAL_MS = 3_000
 
   /** 从 settingsStore 获取 server_path（REST 调用需要） */
   function getServerPath(): string {
@@ -80,26 +87,49 @@ export const useServerStore = defineStore('server', () => {
   async function refreshStatus() {
     try {
       status.value = await api.server.getStatus()
+      lastCheckedAt.value = new Date()
+      if (!status.value.ready) clearLiveData()
     } catch (e) {
       console.error('刷新状态失败:', e)
     }
   }
 
-  // ==================== 60s 轮询引擎 ====================
+  // ==================== 3s 实时轮询引擎 ====================
 
-  /** 启动轮询：防重复 + 立即执行一次 + setInterval(60s) */
-  function startPolling(): void {
+  /** 无论在线或离线都每 3 秒核对进程，并在服务器就绪时刷新 REST 指标。 */
+  function startLiveMonitoring(): void {
     if (pollTimer !== null) return // 防重复
-    void pollOnce() // 立即执行第一次（不等 60s）
-    pollTimer = window.setInterval(() => void pollOnce(), 60_000)
+    void pollOnce()
+    pollTimer = window.setInterval(() => void pollOnce(), LIVE_POLL_INTERVAL_MS)
   }
 
-  /** 停止轮询：clearInterval + 置 null */
-  function stopPolling(): void {
+  function stopLiveMonitoring(): void {
     if (pollTimer !== null) {
       clearInterval(pollTimer)
       pollTimer = null
     }
+  }
+
+  // 兼容现有视图调用。关服只清空在线数据，离线监控仍继续发现外部启动。
+  function startPolling(): void {
+    startLiveMonitoring()
+  }
+
+  function stopPolling(): void {
+    clearLiveData()
+  }
+
+  function clearLiveData(): void {
+    serverInfo.value = null
+    serverMetrics.value = null
+    players.value = []
+    playersState.value = 'idle'
+    playersError.value = null
+    playersLastUpdatedAt.value = null
+  }
+
+  function errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error)
   }
 
   /**
@@ -108,34 +138,58 @@ export const useServerStore = defineStore('server', () => {
    * - 任一项 rejected → 仅清空对应 state（避免陈旧数据），不中断整体轮询；
    * - 仅当三项「全部 rejected」时才停止轮询 + 刷新进程状态。
    */
-  async function pollOnce(): Promise<void> {
-    const serverPath = getServerPath()
-    if (!serverPath) {
-      console.error('轮询失败: 服务器路径为空')
-      stopPolling()
-      return
-    }
-    const results = await Promise.allSettled([
-      api.rest.getInfo(serverPath),
-      api.rest.getMetrics(serverPath),
-      api.rest.getPlayers(serverPath),
-    ])
-    const [infoR, metricsR, playersR] = results
+  async function pollOnce(): Promise<'updated' | 'skipped' | 'error'> {
+    if (pollInFlight) return 'skipped'
+    pollInFlight = true
+    liveDataRefreshing.value = true
+    try {
+      const serverPath = getServerPath()
+      if (!serverPath) {
+        clearLiveData()
+        return 'skipped'
+      }
 
-    if (infoR.status === 'fulfilled') serverInfo.value = infoR.value
-    else serverInfo.value = null
+      try {
+        status.value = await api.server.getStatus()
+        lastCheckedAt.value = new Date()
+      } catch (error) {
+        console.error('刷新服务器进程状态失败:', error)
+        return 'error'
+      }
+      if (!status.value.ready) {
+        clearLiveData()
+        return 'skipped'
+      }
 
-    if (metricsR.status === 'fulfilled') serverMetrics.value = metricsR.value
-    else serverMetrics.value = null
+      playersState.value = 'loading'
+      const results = await Promise.allSettled([
+        api.rest.getInfo(serverPath),
+        api.rest.getMetrics(serverPath),
+        api.rest.getPlayers(serverPath),
+      ])
+      const [infoResult, metricsResult, playersResult] = results
 
-    if (playersR.status === 'fulfilled') players.value = playersR.value
-    else players.value = []
+      serverInfo.value = infoResult.status === 'fulfilled' ? infoResult.value : null
+      serverMetrics.value = metricsResult.status === 'fulfilled' ? metricsResult.value : null
 
-    const allRejected = results.every((r) => r.status === 'rejected')
-    if (allRejected) {
-      console.error('轮询失败：REST 三项全部不可达，停止轮询')
-      stopPolling()
-      await refreshStatus()
+      if (playersResult.status === 'fulfilled') {
+        players.value = playersResult.value
+        playersState.value = 'live'
+        playersError.value = null
+        playersLastUpdatedAt.value = new Date()
+      } else {
+        players.value = []
+        playersState.value = 'error'
+        playersError.value = errorMessage(playersResult.reason)
+      }
+
+      if (results.every((result) => result.status === 'rejected')) {
+        console.error('服务器进程在线，但 REST 数据暂时不可用')
+      }
+      return playersResult.status === 'fulfilled' ? 'updated' : 'error'
+    } finally {
+      pollInFlight = false
+      liveDataRefreshing.value = false
     }
   }
 
@@ -220,11 +274,7 @@ export const useServerStore = defineStore('server', () => {
       status.value = event.payload
       // 进程退出 → 自动停止轮询并清空陈旧的 REST 数据。
       if (!event.payload.running) {
-        stopPolling()
-        // 清空 REST 数据（避免仪表盘显示过期数据）
-        serverInfo.value = null
-        serverMetrics.value = null
-        players.value = []
+        clearLiveData()
       }
     })
   }
@@ -258,7 +308,7 @@ export const useServerStore = defineStore('server', () => {
       unlistenLogSource()
       unlistenLogSource = null
     }
-    stopPolling()
+    stopLiveMonitoring()
   }
 
   return {
@@ -269,12 +319,19 @@ export const useServerStore = defineStore('server', () => {
     serverInfo,
     serverMetrics,
     players,
+    playersState,
+    playersError,
+    playersLastUpdatedAt,
+    liveDataRefreshing,
+    lastCheckedAt,
     init,
     start,
     stop,
     refreshStatus,
     startPolling,
     stopPolling,
+    startLiveMonitoring,
+    stopLiveMonitoring,
     pollOnce,
     gracefulShutdown,
     forceStop,

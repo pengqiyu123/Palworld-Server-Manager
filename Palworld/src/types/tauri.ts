@@ -10,6 +10,8 @@
  */
 export interface ServerStatus {
   running: boolean
+  /** 服务器进程已绑定游戏端口，可接受玩家连接。 */
+  ready: boolean
   pid: number | null
   managed_by_app: boolean
   server_path: string
@@ -17,6 +19,15 @@ export interface ServerStatus {
 }
 
 // ==================== config.rs ====================
+
+/** 本机 REST 管理接口连接结果。端点和服务器信息均来自真实探测。 */
+export interface ManagementConnectionInfo {
+  message: string
+  host: string
+  port: number
+  servername: string
+  version: string
+}
 
 /**
  * 单条配置项的元信息（名称、当前值、描述、字段类型及范围）
@@ -200,6 +211,12 @@ export interface AppSettings {
   rcon_host: string
   rcon_port: number
   rcon_password: string
+  radmin_path: string
+  local_save_roots: string[]
+  server_save_roots: string[]
+  backup_root: string
+  backup_roots: string[]
+  migration_backup_notice_seen: boolean
 }
 
 // ==================== Tauri 命令字符串字面量联合类型 ====================
@@ -252,20 +269,18 @@ export type NetworkCommand =
   | 'check_radmin_lan_status'
   | 'check_radmin_readiness'
 
-/**
- * RCON 远程控制相关命令
- */
-export type RconCommand =
-  | 'rcon_connect'
-  | 'rcon_send_command'
-  | 'rcon_disconnect'
-  | 'rcon_is_connected'
+export type ManagementCommand =
+  | 'rest_management_connect'
+  | 'rest_execute_management_command'
+  | 'rest_save_world'
 
 /**
  * 启动类命令（收官 F2 启动 Radmin VPN / F3 启动游戏本体）
  */
 export type LauncherCommand =
   | 'launch_radmin_vpn'
+  | 'validate_radmin_path'
+  | 'detect_palworld_game'
   | 'launch_game'
 
 // ==================== save_transfer.rs (F4 存档/角色转移 MVP) ====================
@@ -309,6 +324,143 @@ export interface WorldBackupInfo {
   path: string
   created_at: string
   size_bytes: number
+}
+
+export type BackupWorldClass = 'local' | 'server'
+export type BackupKind = 'full' | 'snapshot'
+export type BackupState = 'applying' | 'committed' | 'recovery_required'
+
+export interface BackupFileFingerprint {
+  relative_path: string
+  size: number
+  sha256: string | null
+  absent: boolean
+}
+
+export interface BackupManifest {
+  schema_version: number
+  id: string
+  world_id: string
+  world_name: string
+  world_path: string
+  world_class: BackupWorldClass
+  kind: BackupKind
+  state: BackupState
+  source: string
+  created_at_ms: number
+  total_size: number
+  player_count: number | null
+  save_version: string | null
+  files: BackupFileFingerprint[]
+  workflow_id: string | null
+}
+
+export interface BackupIndex {
+  schema_version: number
+  rebuilt_at_ms: number
+  backups: BackupManifest[]
+}
+
+export type MigrationWorkflowStatus =
+  | 'prepared'
+  | 'applying'
+  | 'awaiting_verification'
+  | 'committed'
+  | 'recovery_required'
+  | 'rolled_back'
+
+export type MigrationWorkflowStage =
+  | 'created'
+  | 'backup_created'
+  | 'world_migrated'
+  | 'awaiting_server_character'
+  | 'character_transferred'
+  | 'guild_restored'
+  | 'awaiting_game_verification'
+  | 'completed'
+
+export interface WorkflowCharacterIdentity {
+  source_player_file: string
+  target_player_file: string
+  source_player_uid: string
+  source_instance_id: string
+  source_group_id: string
+  source_was_guild_admin: boolean
+  target_player_uid: string
+  target_instance_id: string
+  target_group_id: string
+}
+
+export interface MigrationWorkflow {
+  schema_version: number
+  id: string
+  world_id: string
+  source_world_path: string
+  target_world_path: string
+  full_backup_id: string | null
+  snapshot_ids: string[]
+  identity: WorkflowCharacterIdentity | null
+  status: MigrationWorkflowStatus
+  stage: MigrationWorkflowStage
+  current_step: string
+  created_at_ms: number
+  updated_at_ms: number
+  error: string | null
+}
+
+export interface SaveOperationProgress {
+  request_id: string
+  phase: string
+  label: string
+}
+
+export interface MigrateWorldV4Request {
+  request_id: string
+  source_path: string
+  source_name: string
+  target_world: string
+  preserve_server_config: boolean
+}
+
+export interface WorldMigrationV4Outcome {
+  workflow: MigrationWorkflow
+  backup: BackupManifest
+  copied_files: number
+}
+
+export interface TransferFullCharacterV4Request {
+  request_id: string
+  workflow_id: string
+  source_player_file: string
+  target_player_file: string
+}
+
+export interface ImportFriendCharacterV4Request {
+  request_id: string
+  source_world_path: string
+  target_world_path: string
+  source_player_file: string
+  target_player_file: string
+}
+
+export interface TransferFullCharacterV4Outcome {
+  workflow: MigrationWorkflow
+  snapshot: BackupManifest
+  inventory_containers: number
+  character_containers: number
+  pals: number
+  dynamic_items: number
+}
+
+export interface WorkflowActionV4Request {
+  request_id: string
+  workflow_id: string
+}
+
+export interface RestoreOriginalGuildV4Outcome {
+  workflow: MigrationWorkflow
+  snapshot: BackupManifest
+  changed_references: number
 }
 
 /**
@@ -421,22 +573,12 @@ export interface TransferRequest {
   strategy: string
 }
 
-/** 科技点编辑请求（对应 Rust: save_edit::models::TechEditRequest） */
-export interface TechEditRequest {
-  world: string
+/** 修改指定角色的普通科技点和古代科技点。 */
+export interface UpdatePlayerTechnologyPointsRequest {
+  world_path: string
   player_guid: string
-  add_assets: string[]
-  remove_assets: string[]
-  mode: string
-}
-
-/** 玩家基础属性编辑请求（对应 Rust: save_edit::models::PlayerAttrRequest） */
-export interface PlayerAttrRequest {
-  world: string
-  player_guid: string
-  rename: string | null
-  level: number | null
-  max_all: boolean
+  technology_points: number
+  ancient_technology_points: number
 }
 
 /** 改写类命令的统一返回（对应 Rust: save_edit::models::EditResult） */
@@ -447,11 +589,143 @@ export interface EditResult {
   warnings: string[]
 }
 
-/** 科技信息（f5_tech_list 返回，对应 Rust: save_edit::models::TechInfo） */
-export interface TechInfo {
+/** 三阶段迁移的单个 UID 映射：旧角色 UID → 新角色 UID（均为 32-hex registry 串）。
+ *  对应 Rust: save_edit::models::UidMapping */
+export interface UidMapping {
+  old_uid: string
+  new_uid: string
+}
+
+/** 分阶段迁移请求（A 整包拷贝；或 B 角色身份交换 + C 公会绑定）。
+ *  对应 Rust: save_edit::models::ThreePhaseMigrationRequest。
+ *  source_type / delete_world_option / run_phase_a / run_phase_b / run_phase_c 均有 Rust 端 serde 默认值，
+ *  前端必须显式传递阶段开关；A 与 B/C 不得在同一次请求中执行。 */
+export interface ThreePhaseMigrationRequest {
+  source_world: string
+  target_world: string
+  /** 源类型："server"（默认，source_world 为世界名）| "local"（本地世界绝对路径）。 */
+  source_type?: string
+  delete_world_option?: boolean
+  mappings: UidMapping[]
+  /** 是否执行阶段 A（整包世界拷贝）。默认 true。 */
+  run_phase_a?: boolean
+  /** 是否执行阶段 B（旧/新角色身份对称交换）。默认 true。 */
+  run_phase_b?: boolean
+  /** 是否执行阶段 C（公会管理员、成员、角色句柄与所有者重绑）。默认 true。 */
+  run_phase_c?: boolean
+}
+
+/** 三阶段迁移回滚请求（用整份快照还原 SaveGames/0/）。
+ *  对应 Rust: save_edit::models::RollbackRequest */
+export interface RollbackRequest {
+  backup_id: string
+}
+
+/** 三阶段迁移返回（对应 Rust: save_edit::models::MigrationResult） */
+export interface MigrationResult {
+  ok: boolean
+  backup_id: string
+  phase_a_copied: number
+  phase_b_changed: number
+  phase_c_changed: number
+  warnings: string[]
+}
+
+/** 修改器读取的角色科技点。 */
+export interface PlayerTechnologyPoints {
+  technology_points: number
+  ancient_technology_points: number
+}
+
+export interface PlayerTechnologyPointsRequest {
+  world_path: string
+  player_guid: string
+}
+
+export type ModifierAction =
+  | 'rename_player'
+  | 'set_player_level'
+  | 'set_technology_points'
+  | 'unlock_all_technologies'
+  | 'delete_player'
+  | 'make_guild_leader'
+  | 'rename_guild'
+  | 'delete_guild'
+
+export interface ModifierPlayer {
+  player_uid: string
+  guid: string
+  nickname: string
+  level: number
+  pal_count: number
+  guild_id: string | null
+  guild_name: string | null
+  role: string
+  is_leader: boolean
+  last_online: string | null
+  technology_points: number
+  ancient_technology_points: number
+}
+
+export interface ModifierGuild {
+  guild_id: string
   name: string
-  asset: string
-  tech_type: string
+  level: number
+  leader_uid: string
+  leader_name: string
+  member_count: number
+  base_count: number
+}
+
+export interface ModifierWorldState {
+  world_name: string
+  players: ModifierPlayer[]
+  guilds: ModifierGuild[]
+  server_running: boolean
+  game_running: boolean
+}
+
+export interface ModifierOperationProgress {
+  phase:
+    | 'checking_processes'
+    | 'creating_snapshot'
+    | 'building_changes'
+    | 'writing_save'
+    | 'verifying_save'
+    | 'refreshing_data'
+  label: string
+}
+
+export interface ModifierWorldEntry {
+  name: string
+  path: string
+}
+
+export interface ModifierActionRequest {
+  world_path: string
+  action: ModifierAction
+  player_uid?: string
+  guild_id?: string
+  value?: string
+  level?: number
+  technology_points?: number
+  ancient_technology_points?: number
+}
+
+export interface ModifierActionPreview {
+  confirmation_name: string
+  player_count: number
+  pal_count: number
+  base_count: number
+  file_count: number
+  summary: string
+}
+
+export interface ModifierActionResult {
+  ok: boolean
+  snapshot_id: string
+  roundtrip_ok: boolean
+  message: string
 }
 
 /**
@@ -459,9 +733,10 @@ export interface TechInfo {
  */
 export type MigrationCommand =
   | 'f5_world_summary'
-  | 'f5_tech_list'
+  | 'get_player_technology_points'
   | 'fix_host_save'
   | 'migrate_world_to_server'
+  | 'migrate_world_v2'
+  | 'rollback_migration_v2'
   | 'transfer_character'
-  | 'edit_tech'
-  | 'edit_player_attr'
+  | 'update_player_technology_points'

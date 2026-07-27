@@ -102,6 +102,77 @@ pub struct FixHostRequest {
     pub new_char_guid: String,
 }
 
+/// 单条 UID 映射（阶段 B/C：本地玩家旧 UID → 服务器新 UID）。
+///
+/// `old_uid` / `new_uid` 可为 registry 32-hex（如 `3F5D130B...`）或带连字符标准 GUID 形式，
+/// 后端统一经 `sav_io::guid_bytes` 解析为原始 16 字节（registry 格式，与磁盘文件名一致）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UidMapping {
+    /// 旧 UID（本地玩家角色存档文件名，去 .sav）。
+    pub old_uid: String,
+    /// 新 UID（服务器新建角色的存档文件名，去 .sav）。
+    pub new_uid: String,
+}
+
+/// 分阶段迁移请求（v2：A 世界；或 B 角色 + C 公会）。
+///
+/// 阶段 A 等于整包世界拷贝（复用 `MigrateRequest` 语义）；阶段 B/C 由 `mappings` 驱动。
+/// 阶段 A 与 B/C 必须分两次执行：先迁移世界，进入专用服创建目标角色后再执行 B+C。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreePhaseMigrationRequest {
+    /// 源世界名或本地世界绝对路径（见 `source_type`）。
+    pub source_world: String,
+    /// 目标世界名（专用服世界，通常为 `0`）。
+    pub target_world: String,
+    /// 源类型："server"（默认，source_world 为世界名）| "local"（source_world 为本地世界绝对路径）。
+    #[serde(default = "default_source_type")]
+    pub source_type: String,
+    /// 拷贝后是否删除目标 WorldOption.sav（R5）。
+    #[serde(default)]
+    pub delete_world_option: bool,
+    /// 旧→新 UID 映射（阶段 B 角色替换 + 阶段 C 公会绑定共用）。
+    #[serde(default)]
+    pub mappings: Vec<UidMapping>,
+    /// 是否执行阶段 A（整包世界拷贝）。默认 true 以兼容旧调用。
+    #[serde(default = "default_true")]
+    pub run_phase_a: bool,
+    /// 是否执行阶段 B（旧/新角色身份对称交换）。
+    #[serde(default = "default_true")]
+    pub run_phase_b: bool,
+    /// 是否执行阶段 C（公会 RawData 内管理员、成员、角色句柄与所有者重绑）。
+    #[serde(default = "default_true")]
+    pub run_phase_c: bool,
+}
+
+/// 迁移回滚请求（v2）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RollbackRequest {
+    /// 迁移前生成的整份快照 id（`migrate_world_v2` 返回的 `backup_id`）。
+    pub backup_id: String,
+}
+
+/// 三阶段迁移结果（v2）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MigrationResult {
+    #[serde(default)]
+    pub ok: bool,
+    /// 整份快照 id（用于回滚）。
+    #[serde(default)]
+    pub backup_id: String,
+    /// 阶段 A 拷贝的文件数。
+    #[serde(default)]
+    pub phase_a_copied: usize,
+    /// 阶段 B 改写的文件数。
+    #[serde(default)]
+    pub phase_b_changed: usize,
+    /// 阶段 C 改写（命中并替换）的 UID 映射数。
+    #[serde(default)]
+    pub phase_c_changed: usize,
+    /// 提示 / 告警。
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
 /// 整包世界迁移请求（T03）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MigrateRequest {
@@ -138,37 +209,32 @@ pub struct TransferRequest {
     pub strategy: String,
 }
 
-/// 科技点编辑请求（T05）。
-///
-/// `add_assets` / `remove_assets` 为科技 asset 名（如 "StonePile"），
-/// 来自 `world_data.json` 的 `technology[]`。
+/// 修改指定角色的普通科技点和古代科技点。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TechEditRequest {
-    pub world: String,
+#[serde(deny_unknown_fields)]
+pub struct UpdatePlayerTechnologyPointsRequest {
+    /// 由世界列表返回的世界目录；后端会定位实际含 Level.sav 的数据层。
+    pub world_path: String,
     pub player_guid: String,
-    #[serde(default)]
-    pub add_assets: Vec<String>,
-    #[serde(default)]
-    pub remove_assets: Vec<String>,
-    /// "single" | "batch"。
-    #[serde(default)]
-    pub mode: String,
+    pub technology_points: i32,
+    pub ancient_technology_points: i32,
 }
 
-/// 玩家基础属性编辑请求（T05）。
+/// 修改器读取角色科技点时使用的只读请求。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlayerAttrRequest {
-    pub world: String,
+#[serde(deny_unknown_fields)]
+pub struct PlayerTechnologyPointsRequest {
+    /// 由世界列表返回的世界目录；后端会定位实际含 Level.sav 的数据层。
+    pub world_path: String,
+    /// Players/<guid>.sav 的文件名基底。
     pub player_guid: String,
-    /// 改名（None 表示不改）。
-    #[serde(default)]
-    pub rename: Option<String>,
-    /// 设等级（None 表示不改）。
-    #[serde(default)]
-    pub level: Option<u32>,
-    /// 是否将关键属性拉满（Max All）。
-    #[serde(default)]
-    pub max_all: bool,
+}
+
+/// 角色科技点摘要。字段名与参考项目的 `SaveData` 中真实字段对应。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayerTechnologyPoints {
+    pub technology_points: i32,
+    pub ancient_technology_points: i32,
 }
 
 /// 改写类命令的统一返回（含备份 id 与 round-trip 校验结果）。
@@ -182,13 +248,4 @@ pub struct EditResult {
     pub roundtrip_ok: bool,
     #[serde(default)]
     pub warnings: Vec<String>,
-}
-
-/// 科技信息（f5_tech_list 返回，来自 vendored world_data.json）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TechInfo {
-    pub name: String,
-    pub asset: String,
-    #[serde(default)]
-    pub tech_type: String,
 }

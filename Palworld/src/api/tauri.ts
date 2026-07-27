@@ -1,10 +1,12 @@
 import { invoke } from '@tauri-apps/api/core'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import type {
   ServerStatus,
   FirewallStatus,
   ConfigValue,
   RadminLanStatus,
   RadminReadiness,
+  ManagementConnectionInfo,
   AppSettings,
   PresetMeta,
   BackupInfo,
@@ -17,12 +19,33 @@ import type {
   WorldBackupInfo,
   WorldSummary,
   EditResult,
-  TechInfo,
+  PlayerTechnologyPoints,
+  PlayerTechnologyPointsRequest,
   FixHostRequest,
   MigrateRequest,
   TransferRequest,
-  TechEditRequest,
-  PlayerAttrRequest,
+  UpdatePlayerTechnologyPointsRequest,
+  ThreePhaseMigrationRequest,
+  RollbackRequest,
+  MigrationResult,
+  BackupManifest,
+  BackupIndex,
+  BackupWorldClass,
+  MigrationWorkflow,
+  SaveOperationProgress,
+  MigrateWorldV4Request,
+  WorldMigrationV4Outcome,
+  TransferFullCharacterV4Request,
+  ImportFriendCharacterV4Request,
+  TransferFullCharacterV4Outcome,
+  WorkflowActionV4Request,
+  RestoreOriginalGuildV4Outcome,
+  ModifierWorldState,
+  ModifierWorldEntry,
+  ModifierActionRequest,
+  ModifierActionPreview,
+  ModifierActionResult,
+  ModifierOperationProgress,
 } from '@/types/tauri'
 
 /**
@@ -111,24 +134,22 @@ export const api = {
       tauriInvoke<RadminReadiness>('check_radmin_readiness', { serverPath }),
   },
 
-  // === rcon.rs (5 个) ===
-  rcon: {
-    // 返回成功提示字符串，如 "RCON连接成功"
-    connect: (host: string, port: number, password: string) =>
-      tauriInvoke<string>('rcon_connect', { host, port, password }),
-    // 新命令（Q2）：仅传 server_path，host 固定 127.0.0.1，密码/端口从 ini 读取（不进前端 JS）
-    connectUsingConfig: (serverPath: string) =>
-      tauriInvoke<string>('rcon_connect_using_config', { serverPath }),
-    // 返回 RCON 服务器的响应文本
-    send: (command: string) => tauriInvoke<string>('rcon_send_command', { command }),
-    disconnect: () => tauriInvoke<void>('rcon_disconnect'),
-    isConnected: () => tauriInvoke<boolean>('rcon_is_connected'),
+  // 核心管理动作使用 Palworld 官方 REST API；密码只在 Rust 侧读取。
+  management: {
+    connect: (serverPath: string) =>
+      tauriInvoke<ManagementConnectionInfo>('rest_management_connect', { serverPath }),
+    execute: (serverPath: string, command: string) =>
+      tauriInvoke<string>('rest_execute_management_command', { serverPath, command }),
   },
 
   // === launcher.rs (2 个 · 收官 F2/F3) ===
   launcher: {
     /** F2：启动 Radmin VPN 应用（仅拉起，加入网络由用户操作）。返回 "已启动 Radmin VPN" 或明确错误。 */
-    launchRadminVpn: () => tauriInvoke<string>('launch_radmin_vpn'),
+    launchRadminVpn: (preferredPath = '') =>
+      tauriInvoke<string>('launch_radmin_vpn', { preferredPath: preferredPath || null }),
+    validateRadminPath: (path: string) =>
+      tauriInvoke<string>('validate_radmin_path', { path }),
+    detectGame: () => tauriInvoke<string>('detect_palworld_game'),
     /** F3：启动游戏本体（优先 Steam 协议 steam://rungame/1623730，兜底直接拉起 Palworld.exe）。 */
     launchGame: () => tauriInvoke<string>('launch_game'),
   },
@@ -161,6 +182,35 @@ export const api = {
     /** 导入角色存档（保持 steam_id 不变，覆盖同名文件）。 */
     importCharacter: (worldName: string, steamId: string, srcPath: string) =>
       tauriInvoke<string>('import_character', { worldName, steamId, srcPath }),
+    createFullBackup: (
+      sourceWorld: string,
+      worldId: string,
+      worldName: string,
+      worldClass: BackupWorldClass,
+      source: string,
+    ) => tauriInvoke<BackupManifest>('backup_create_full', {
+      sourceWorld,
+      worldId,
+      worldName,
+      worldClass,
+      source,
+    }),
+    getBackupRoot: () => tauriInvoke<string>('backup_get_root'),
+    listFullBackups: () => tauriInvoke<BackupManifest[]>('backup_list_full'),
+    deleteFullBackup: (backupId: string) =>
+      tauriInvoke<void>('backup_delete_full', { backupId }),
+    restoreFullBackup: (backupId: string) =>
+      tauriInvoke<void>('backup_restore_full', { backupId }),
+    listSnapshots: (worldId?: string) =>
+      tauriInvoke<BackupManifest[]>('backup_list_snapshots', { worldId }),
+    restoreSnapshot: (snapshotId: string) =>
+      tauriInvoke<void>('backup_restore_snapshot', { snapshotId }),
+    deleteSnapshot: (snapshotId: string) =>
+      tauriInvoke<void>('backup_delete_snapshot', { snapshotId }),
+    loadWorkflow: (workflowId: string) =>
+      tauriInvoke<MigrationWorkflow>('backup_load_workflow', { workflowId }),
+    listWorkflows: () => tauriInvoke<MigrationWorkflow[]>('backup_list_workflows'),
+    rebuildBackupIndex: () => tauriInvoke<BackupIndex>('backup_rebuild_index'),
   },
 
   // === save_edit.rs (F5 · 存档迁移/改写 MVP，独立命名空间，不触碰 F4) ===
@@ -171,8 +221,9 @@ export const api = {
     /** 按真实世界目录路径解析玩家/公会列表（本地单机 / 服务器通用）。 */
     worldSummaryByPath: (path: string) =>
       tauriInvoke<WorldSummary>('f5_world_summary_by_path', { path }),
-    /** 科技名↔asset 列表（来自 vendored world_data.json）。 */
-    techList: () => tauriInvoke<TechInfo[]>('f5_tech_list'),
+    /** 读取所选角色的普通科技点和古代科技点；只读，不修改存档。 */
+    playerTechnologyPoints: (req: PlayerTechnologyPointsRequest) =>
+      tauriInvoke<PlayerTechnologyPoints>('get_player_technology_points', { req }),
     /** Fix Host Save：旧主机角色 ↔ 新角色 UID 互换（灵魂步骤）。 */
     fixHostSave: (req: FixHostRequest) => tauriInvoke<EditResult>('fix_host_save', req),
     /** 整包世界迁移（文件级拷贝 + WorldOption/DedicatedServerName 提示）。 */
@@ -181,11 +232,44 @@ export const api = {
     /** 跨服角色转移（按 L4 子集）。 */
     transferCharacter: (req: TransferRequest) =>
       tauriInvoke<EditResult>('transfer_character', req),
-    /** 科技点解锁/移除（单项 + 批量）。 */
-    editTech: (req: TechEditRequest) => tauriInvoke<EditResult>('edit_tech', req),
-    /** 玩家基础属性（改名/等级/Max All）。 */
-    editPlayerAttr: (req: PlayerAttrRequest) =>
-      tauriInvoke<EditResult>('edit_player_attr', req),
+    /** 原子更新所选角色的普通科技点和古代科技点。 */
+    updatePlayerTechnologyPoints: (req: UpdatePlayerTechnologyPointsRequest) =>
+      tauriInvoke<EditResult>('update_player_technology_points', { req }),
+    /** 三阶段迁移（A 整包拷贝 + B 角色替换 + C 公会绑定）。
+     *  显式传入 old→new UID 映射；后端自动整份快照 SaveGames/0/，失败整份回滚，且需停服。
+     *  对应 Rust: save_edit::migrate_world_v2 */
+    migrateWorldV2: (req: ThreePhaseMigrationRequest) =>
+      tauriInvoke<MigrationResult>('migrate_world_v2', req),
+    /** 用整份快照回滚三阶段迁移（backup_id 来自 migrateWorldV2 返回）。
+     *  对应 Rust: save_edit::rollback_migration_v2（返回 EditResult） */
+    rollbackMigrationV2: (req: RollbackRequest) =>
+      tauriInvoke<EditResult>('rollback_migration_v2', req),
+    migrateWorldV4: (req: MigrateWorldV4Request) =>
+      tauriInvoke<WorldMigrationV4Outcome>('migrate_world_v4', { req }),
+    transferFullCharacterV4: (req: TransferFullCharacterV4Request) =>
+      tauriInvoke<TransferFullCharacterV4Outcome>('transfer_full_character_v4', { req }),
+    importFriendCharacterV4: (req: ImportFriendCharacterV4Request) =>
+      tauriInvoke<TransferFullCharacterV4Outcome>('import_friend_character_v4', { req }),
+    restoreOriginalGuildV4: (req: WorkflowActionV4Request) =>
+      tauriInvoke<RestoreOriginalGuildV4Outcome>('restore_original_guild_v4', { req }),
+    completeMigrationWorkflowV4: (req: WorkflowActionV4Request) =>
+      tauriInvoke<MigrationWorkflow>('complete_migration_workflow_v4', { req }),
+    rollbackMigrationWorkflowV4: (req: WorkflowActionV4Request) =>
+      tauriInvoke<MigrationWorkflow>('rollback_migration_workflow_v4', { req }),
+    onProgress: (handler: (progress: SaveOperationProgress) => void): Promise<UnlistenFn> =>
+      listen<SaveOperationProgress>('save-operation-progress', (event) => handler(event.payload)),
+  },
+
+  modifier: {
+    discoverWorlds: () => tauriInvoke<ModifierWorldEntry[]>('discover_modifier_worlds'),
+    getWorld: (path: string) =>
+      tauriInvoke<ModifierWorldState>('get_modifier_world', { path }),
+    previewAction: (request: ModifierActionRequest) =>
+      tauriInvoke<ModifierActionPreview>('preview_modifier_action', { request }),
+    applyAction: (request: ModifierActionRequest) =>
+      tauriInvoke<ModifierActionResult>('apply_modifier_action', { request }),
+    onProgress: (handler: (progress: ModifierOperationProgress) => void): Promise<UnlistenFn> =>
+      listen<ModifierOperationProgress>('modifier-operation-progress', (event) => handler(event.payload)),
   },
 
   // === settings.rs (2 个) ===
@@ -217,6 +301,7 @@ export const api = {
       tauriInvoke<void>('rest_unban_player', { serverPath, userid }),
     announce: (serverPath: string, message: string) =>
       tauriInvoke<void>('rest_announce', { serverPath, message }),
+    save: (serverPath: string) => tauriInvoke<void>('rest_save_world', { serverPath }),
     shutdown: (serverPath: string, waittime: number, message: string) =>
       tauriInvoke<void>('rest_shutdown', { serverPath, waittime, message }),
   },

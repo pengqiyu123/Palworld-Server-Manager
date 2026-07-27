@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::from_str;
-use std::io::{Error as IoError, ErrorKind};
+use std::io::ErrorKind;
 use std::net::UdpSocket;
 use std::process::Command;
 use tauri::{command, State};
@@ -68,7 +68,11 @@ impl RadminReadiness {
             virtual_ip: String::new(),
             adapter_status,
             reason: Some("Radmin 网卡存在但未启动，请打开 Radmin VPN 客户端".to_string()),
-            next_action: Some(next_action("launch_app", "打开 Radmin 客户端", Some("Radmin VPN"))),
+            next_action: Some(next_action(
+                "launch_app",
+                "打开 Radmin 客户端",
+                Some("Radmin VPN"),
+            )),
         }
     }
 
@@ -108,11 +112,7 @@ impl RadminReadiness {
             virtual_ip,
             adapter_status: "Up".to_string(),
             reason: Some("联机就绪：虚拟 IP 已拿到、服务器在监听、8211 已放行".to_string()),
-            next_action: Some(next_action(
-                "copy_card",
-                "复制连法给朋友",
-                None,
-            )),
+            next_action: Some(next_action("copy_card", "复制连法给朋友", None)),
         }
     }
 }
@@ -153,8 +153,7 @@ fn detect_adapter() -> Result<Option<(String, String, u32)>, String> {
     if out.is_empty() {
         return Ok(None);
     }
-    let info: AdapterInfo =
-        from_str(&out).map_err(|e| format!("解析网卡信息失败: {}", e))?;
+    let info: AdapterInfo = from_str(&out).map_err(|e| format!("解析网卡信息失败: {}", e))?;
     if info.name.is_empty() {
         return Ok(None);
     }
@@ -269,7 +268,9 @@ pub fn check_radmin_lan() -> Result<RadminStatus, String> {
         .output()
         .map_err(|e| format!("检测Radmin适配器失败: {}", e))?;
 
-    let adapter_status = String::from_utf8_lossy(&adapter_output.stdout).trim().to_string();
+    let adapter_status = String::from_utf8_lossy(&adapter_output.stdout)
+        .trim()
+        .to_string();
 
     if adapter_status.is_empty() {
         return Ok(RadminStatus {
@@ -288,7 +289,9 @@ pub fn check_radmin_lan() -> Result<RadminStatus, String> {
         .output()
         .map_err(|e| format!("获取Radmin IP失败: {}", e))?;
 
-    let virtual_ip = String::from_utf8_lossy(&ip_output.stdout).trim().to_string();
+    let virtual_ip = String::from_utf8_lossy(&ip_output.stdout)
+        .trim()
+        .to_string();
 
     Ok(RadminStatus {
         installed: true,
@@ -343,13 +346,8 @@ pub async fn check_port_usage(port: u16) -> Result<Option<String>, String> {
     }
 }
 
-/// R2 旧命令：仅返回 installed / virtual_ip / adapter_status。
-/// ⚠️ Deprecated since R3：新前端应使用 `check_radmin_readiness`（5 档分级）。
-/// 保留期为 R2→R3 过渡，避免老前端调用方直接报错。
-#[deprecated(
-    since = "R3",
-    note = "Use check_radmin_readiness (5-level) instead; kept for R2 frontend compatibility."
-)]
+/// 简版检测命令，供概览与故障诊断快速读取网卡状态。
+/// 联机向导应使用 `check_radmin_readiness` 获取完整的五级状态。
 #[command]
 pub async fn check_radmin_lan_status() -> Result<RadminLanStatus, String> {
     let status = check_radmin_lan().map_err(|e| e)?;

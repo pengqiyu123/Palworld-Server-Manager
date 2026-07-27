@@ -15,5 +15,7 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     include: ['tests/**/*.spec.ts'],
+    maxWorkers: 1,
+    fileParallelism: false,
   },
 })

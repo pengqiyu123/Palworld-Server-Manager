@@ -1,39 +1,28 @@
-// TDD 守卫：服务器存档手动选目录 + 备份/恢复可指定文件夹路径
-// 风格与现有 save-*.spec.ts 一致：直接读源码字符串做断言，不依赖运行时。
-
-import { readFileSync } from 'fs'
-import { resolve } from 'path'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 
 const saveView = readFileSync(resolve(__dirname, '../src/views/SaveManagementView.vue'), 'utf-8')
-const apiSrc = readFileSync(resolve(__dirname, '../src/api/tauri.ts'), 'utf-8')
+const apiSource = readFileSync(resolve(__dirname, '../src/api/tauri.ts'), 'utf-8')
 
-describe('本地存档/服务器存档 手动选目录一致', () => {
-  it('服务器存档区（区块B）也有「手动选择目录」兜底按钮，与本地单机一致', () => {
-    // 本地单机已存在 onPickLocalDir；服务器区应新增对称的 onPickServerDir
-    expect(saveView).toContain('onPickLocalDir')
-    expect(saveView).toContain('onPickServerDir')
-    // 服务器区提示里应出现「手动选择目录」文案（已在区块B内）
-    expect(saveView).toContain('手动选择目录…')
-  })
-
-  it('discoverWorlds 后端命令支持额外根（extraRoot）参数', () => {
-    expect(apiSrc).toContain('discoverWorlds: (extraRoot?')
-    expect(apiSrc).toContain("'discover_worlds'")
+describe('世界目录手动选择', () => {
+  it('本机与服务器世界共用目录选择入口', () => {
+    expect(saveView).toContain("pickWorldDirectory('local')")
+    expect(saveView).toContain("pickWorldDirectory('server')")
+    expect(apiSource).toContain('discoverWorlds: (extraRoot?')
   })
 })
 
-describe('世界备份/恢复 可指定文件夹路径存放', () => {
-  it('备份区有「选择存放目录」拾取器，并把路径传给 backupWorld(dest)', () => {
-    expect(saveView).toContain('onPickBackupDir')
-    expect(saveView).toContain('backupDest')
-    // backupWorld 调用应传入所选世界的真实路径（selectedWorld.path）+ 自定义目标（dest 非空时）
-    // 注：原 selectedServerName 已重构为 selectedWorld（WorldInfo|null），按真实路径操作。
-    expect(saveView).toContain('backupWorld(selectedWorld.value.path, backupDest.value')
+describe('V4 备份位置与恢复', () => {
+  it('允许更改后续备份位置并保留历史根', () => {
+    expect(saveView).toContain('pickBackupRoot')
+    expect(saveView).toContain('backup_root: directory')
+    expect(saveView).toContain('settingsStore.save()')
+    expect(apiSource).toContain("'backup_get_root'")
   })
 
-  it('恢复区有「从自定义目录恢复」入口，调用 restoreWorldFrom', () => {
-    expect(saveView).toContain('onRestoreFromDir')
-    expect(saveView).toContain('从自定义目录恢复')
-    expect(apiSrc).toContain('restoreWorldFrom')
+  it('只恢复索引中列出的完整备份或操作回滚点', () => {
+    expect(saveView).toContain('restoreFullBackup(item.id)')
+    expect(saveView).toContain('restoreSnapshot(item.id)')
+    expect(saveView).not.toContain('restoreWorldFrom')
   })
 })

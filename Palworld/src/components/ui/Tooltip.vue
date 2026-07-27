@@ -5,8 +5,9 @@
         v-if="uiStore.tooltip.visible"
         class="app-tooltip"
         :style="{ left: uiStore.tooltip.x + 'px', top: uiStore.tooltip.y + 'px' }"
-        v-html="uiStore.tooltip.html"
-      />
+      >
+        {{ uiStore.tooltip.text }}
+      </div>
     </Transition>
   </Teleport>
 </template>
@@ -21,5 +22,6 @@ const uiStore = useUiStore()
 <style scoped>
 .app-tooltip {
   transform: translateY(-50%);
+  white-space: pre-line;
 }
 </style>

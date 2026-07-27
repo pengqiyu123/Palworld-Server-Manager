@@ -33,7 +33,7 @@ interface StepMeta {
 
 const stepMeta: StepMeta[] = [
   { id: 's1', title: '检测服务器路径', desc: '定位 PalServer.exe' },
-  { id: 's2', title: '配置已就绪', desc: 'RCON / REST / 密码' },
+  { id: 's2', title: '配置已就绪', desc: 'REST / 管理密码' },
   { id: 's3', title: '启动服务器', desc: '进程运行 + REST 就绪' },
   { id: 's4', title: '放行防火墙', desc: '8211 / 25575 / 8212' },
   { id: 's5', title: 'Radmin 就绪', desc: '5 档检测 L4' },

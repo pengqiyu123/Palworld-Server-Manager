@@ -122,6 +122,10 @@ const ICONS: Record<string, { vb: string; inner: string }> = {
     vb: '0 0 22 22',
     inner: '<rect x="3" y="6.5" width="7" height="10" rx="1.5" stroke="#e66f51" stroke-width="1.4" fill="none"/><path d="M12 11.5H15.5M14 9.5L16.5 11.5L14 13.5" stroke="#e66f51" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/><rect x="17" y="6.5" width="2.5" height="10" rx="1" stroke="#e66f51" stroke-width="1.4" fill="none"/>',
   },
+  modifier: {
+    vb: '0 0 22 22',
+    inner: '<path d="M5 5H17M5 11H17M5 17H17" stroke="#e66f51" stroke-width="1.4" stroke-linecap="round"/><circle cx="9" cy="5" r="2" fill="#3f322c" stroke="#e66f51" stroke-width="1.4"/><circle cx="14" cy="11" r="2" fill="#3f322c" stroke="#e66f51" stroke-width="1.4"/><circle cx="7" cy="17" r="2" fill="#3f322c" stroke="#e66f51" stroke-width="1.4"/>',
+  },
   'ph-backup': {
     vb: '0 0 56 56',
     inner: '<rect x="9" y="9" width="38" height="38" rx="5" stroke="#a39383" stroke-width="2.4" fill="none"/><path d="M18 9V18H38V9" stroke="#a39383" stroke-width="2.4" fill="none"/><circle cx="28" cy="32" r="6" stroke="#a39383" stroke-width="2.4" fill="none"/>',

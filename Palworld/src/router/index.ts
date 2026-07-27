@@ -34,7 +34,7 @@ const routes: RouteRecordRaw[] = [
     path: '/rcon',
     name: 'rcon',
     component: () => import('@/views/RconView.vue'),
-    meta: { title: 'RCON' },
+    meta: { title: '服务器控制台' },
   },
   {
     path: '/logs',
@@ -46,28 +46,23 @@ const routes: RouteRecordRaw[] = [
     path: '/saves',
     name: 'saves',
     component: () => import('@/views/SaveManagementView.vue'),
-    meta: { title: '本地存档' },
+    meta: { title: '世界存档' },
   },
   {
     path: '/migrate',
     name: 'migrate',
     component: () => import('@/views/SaveMigrationView.vue'),
-    meta: { title: '数据迁移' },
+    meta: { title: '世界与角色迁移' },
+  },
+  {
+    path: '/modifier',
+    name: 'modifier',
+    component: () => import('@/views/ModifierView.vue'),
+    meta: { title: '修改器' },
   },
   {
     path: '/backup',
-    name: 'backup',
-    component: () => import('@/views/PlaceholderView.vue'),
-    meta: {
-      title: '配置备份',
-      phDesc: '配置备份功能为后续版本规划。当前每次保存配置时 Rust 后端会自动备份旧配置文件，可通过恢复功能还原。',
-      phIcon: 'ph-backup',
-    },
-    props: (route) => ({
-      title: route.meta.title as string,
-      desc: route.meta.phDesc as string,
-      iconName: route.meta.phIcon as string,
-    }),
+    redirect: { path: '/saves', query: { tab: 'backup' } },
   },
   {
     path: '/settings',
@@ -75,7 +70,7 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/PlaceholderView.vue'),
     meta: {
       title: '设置',
-      phDesc: '应用设置为后续版本规划。当前服务器路径、RCON 配置等已通过自动探测完成初始化。',
+      phDesc: '应用设置为后续版本规划。当前服务器路径与本机管理接口已通过自动探测完成初始化。',
       phIcon: 'ph-settings',
     },
     props: (route) => ({

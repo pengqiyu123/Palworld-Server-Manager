@@ -17,10 +17,11 @@ pub struct BackupInfo {
 /// 获取备份目录：%AppData%/PalworldServerManager/config-backups/
 fn backups_dir() -> Result<PathBuf, String> {
     let app_data = dirs::data_dir().ok_or_else(|| "无法定位 AppData 目录".to_string())?;
-    let dir = app_data.join("PalworldServerManager").join("config-backups");
+    let dir = app_data
+        .join("PalworldServerManager")
+        .join("config-backups");
     if !dir.exists() {
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| format!("创建备份目录失败: {}", e))?;
+        std::fs::create_dir_all(&dir).map_err(|e| format!("创建备份目录失败: {}", e))?;
     }
     Ok(dir)
 }
@@ -57,7 +58,20 @@ fn days_to_ymd(days: i64) -> (i64, u32, u32) {
         y += 1;
     }
     let leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
-    let mdays = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mdays = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut mo = 0u32;
     let mut rem = d as u32;
     while (mo as usize) < mdays.len() && rem >= mdays[mo as usize] {
@@ -77,7 +91,10 @@ fn prune_old_backups(dir: &Path) {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("ini") {
-            let mtime = entry.metadata().and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+            let mtime = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
             let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
             files.push((path, mtime, size));
         }
@@ -115,16 +132,26 @@ fn backup_existing_config(path: &str) {
 pub fn list_config_backups() -> Result<Vec<BackupInfo>, String> {
     let dir = backups_dir()?;
     let mut backups = Vec::new();
-    let entries = std::fs::read_dir(&dir)
-        .map_err(|e| format!("读取备份目录失败: {}", e))?;
+    let entries = std::fs::read_dir(&dir).map_err(|e| format!("读取备份目录失败: {}", e))?;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("ini") {
-            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
-            let mtime = entry.metadata().and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+            let name = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            let mtime = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
             let timestamp = format_timestamp(mtime);
             let size_bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
-            backups.push(BackupInfo { name, timestamp, size_bytes });
+            backups.push(BackupInfo {
+                name,
+                timestamp,
+                size_bytes,
+            });
         }
     }
     // 按时间降序（最新在前）
@@ -153,17 +180,14 @@ pub fn restore_config_backup(name: String, server_path: String) -> Result<String
         .join("PalWorldSettings.ini");
     if let Some(parent) = target.parent() {
         if !parent.exists() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("创建目标目录失败: {}", e))?;
+            std::fs::create_dir_all(parent).map_err(|e| format!("创建目标目录失败: {}", e))?;
         }
     }
-    std::fs::copy(&backup_path, &target)
-        .map_err(|e| format!("恢复备份失败: {}", e))?;
+    std::fs::copy(&backup_path, &target).map_err(|e| format!("恢复备份失败: {}", e))?;
     Ok(format!("已从备份 {} 恢复配置", safe_name))
 }
 
 // ==================== 配置管理 ====================
-
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ConfigValue {
@@ -259,7 +283,10 @@ fn default_config_map() -> HashMap<String, String> {
         ("RCONPort", "25575"),
         ("Region", "\"\""),
         ("bUseAuth", "True"),
-        ("BanListURL", "\"https://b.palworldgame.com/api/banlist.txt\""),
+        (
+            "BanListURL",
+            "\"https://b.palworldgame.com/api/banlist.txt\"",
+        ),
         ("RESTAPIEnabled", "False"),
         ("RESTAPIPort", "8212"),
         ("bShowPlayerList", "False"),
@@ -289,7 +316,10 @@ fn default_config_map() -> HashMap<String, String> {
         ("RespawnPenaltyTimeScale", "2.000000"),
         ("bDisplayPvPItemNumOnWorldMap_BaseCamp", "False"),
         ("bDisplayPvPItemNumOnWorldMap_Player", "False"),
-        ("AdditionalDropItemWhenPlayerKillingInPvPMode", "\"PlayerDropItem\""),
+        (
+            "AdditionalDropItemWhenPlayerKillingInPvPMode",
+            "\"PlayerDropItem\"",
+        ),
         ("AdditionalDropItemNumWhenPlayerKillingInPvPMode", "1"),
         ("bAdditionalDropItemWhenPlayerKillingInPvPMode", "False"),
         ("bEnableVoiceChat", "False"),
@@ -404,6 +434,7 @@ pub fn extract_admin_password(config: &HashMap<String, String>) -> String {
 }
 
 /// 从配置 HashMap 中提取 RCONPort（默认 25575），供 rcon.rs 连接使用（Q2）。
+#[cfg(test)]
 pub fn extract_rcon_port(config: &HashMap<String, String>) -> u16 {
     config
         .get("RCONPort")
@@ -416,6 +447,7 @@ pub fn extract_rcon_port(config: &HashMap<String, String>) -> u16 {
 
 /// 读取 RCON 连接凭据（AdminPassword + RCONPort），供 rcon_connect_using_config 使用（Q2）。
 /// 路径：{server_path}/Pal/Saved/Config/WindowsServer/PalWorldSettings.ini
+#[cfg(test)]
 pub fn read_rcon_credentials(server_path: &str) -> Result<(String, u16), String> {
     let config_path = Path::new(server_path)
         .join("Pal")
@@ -423,8 +455,7 @@ pub fn read_rcon_credentials(server_path: &str) -> Result<(String, u16), String>
         .join("Config")
         .join("WindowsServer")
         .join("PalWorldSettings.ini");
-    let config_map =
-        read_config_from_file(config_path.to_str().ok_or("服务器路径包含非法字符")?)?;
+    let config_map = read_config_from_file(config_path.to_str().ok_or("服务器路径包含非法字符")?)?;
     let password = extract_admin_password(&config_map);
     let port = extract_rcon_port(&config_map);
     Ok((password, port))
@@ -455,7 +486,10 @@ pub async fn write_config(path: String, config: HashMap<String, String>) -> Resu
     let mut options: Vec<(String, String)> = config.into_iter().collect();
     options.sort_by(|a, b| a.0.cmp(&b.0));
 
-    let lines: Vec<String> = options.into_iter().map(|(k, v)| format!("{}={}", k, v)).collect();
+    let lines: Vec<String> = options
+        .into_iter()
+        .map(|(k, v)| format!("{}={}", k, v))
+        .collect();
 
     let content = format!(
         "[/Script/Pal.PalGameWorldSettings]\nOptionSettings=({})\n",
@@ -465,8 +499,7 @@ pub async fn write_config(path: String, config: HashMap<String, String>) -> Resu
     // 首次启动前 WindowsServer 目录可能尚未被服务器创建，写入前先确保父目录存在
     if let Some(parent) = Path::new(&path).parent() {
         if !parent.as_os_str().is_empty() && !parent.exists() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("创建配置目录失败: {}", e))?;
+            std::fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败: {}", e))?;
         }
     }
 
@@ -507,9 +540,16 @@ pub async fn fill_default_config(server_path: String) -> Result<FillConfigResult
         return Err("未设置服务器路径（server_path 为空）。请到【设置】填写 PalServer.exe 所在根目录后再试。".into());
     }
     let live = PathBuf::from(&server_path)
-        .join("Pal").join("Saved").join("Config").join("WindowsServer").join("PalWorldSettings.ini");
+        .join("Pal")
+        .join("Saved")
+        .join("Config")
+        .join("WindowsServer")
+        .join("PalWorldSettings.ini");
     let template = PathBuf::from(&server_path)
-        .join("Pal").join("Config").join("WindowsServer").join("DefaultPalWorldSettings.ini");
+        .join("Pal")
+        .join("Config")
+        .join("WindowsServer")
+        .join("DefaultPalWorldSettings.ini");
 
     // ① 已填好（含 OptionSettings=( ）→ 跳过
     if live.exists() {
@@ -527,7 +567,7 @@ pub async fn fill_default_config(server_path: String) -> Result<FillConfigResult
     // ② 模板存在 → 先备份 live（若有），再复制模板
     if template.exists() {
         backup_existing_config(live.to_str().unwrap_or("")); // 复用 config.rs 既有备份逻辑
-        // 确保父目录存在（Pal/Saved/Config/WindowsServer/ 可能尚未创建），与三级分支一致
+                                                             // 确保父目录存在（Pal/Saved/Config/WindowsServer/ 可能尚未创建），与三级分支一致
         if let Some(parent) = live.parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
                 std::fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败: {}", e))?;
@@ -537,7 +577,8 @@ pub async fn fill_default_config(server_path: String) -> Result<FillConfigResult
         return Ok(FillConfigResult {
             status: "filled_from_template".into(),
             source: template.to_string_lossy().into(),
-            message: "已从 DefaultPalWorldSettings.ini 填充 PalWorldSettings.ini，可正常开服。".into(),
+            message: "已从 DefaultPalWorldSettings.ini 填充 PalWorldSettings.ini，可正常开服。"
+                .into(),
         });
     }
 
@@ -546,8 +587,14 @@ pub async fn fill_default_config(server_path: String) -> Result<FillConfigResult
     if !map.is_empty() {
         let mut options: Vec<(String, String)> = map.into_iter().collect();
         options.sort_by(|a, b| a.0.cmp(&b.0));
-        let lines: Vec<String> = options.into_iter().map(|(k, v)| format!("{}={}", k, v)).collect();
-        let content = format!("[ /Script/Pal.PalGameWorldSettings ]\nOptionSettings=({})\n", lines.join(","));
+        let lines: Vec<String> = options
+            .into_iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect();
+        let content = format!(
+            "[ /Script/Pal.PalGameWorldSettings ]\nOptionSettings=({})\n",
+            lines.join(",")
+        );
         if let Some(parent) = live.parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
                 std::fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败: {}", e))?;
@@ -573,7 +620,11 @@ pub async fn is_config_initialized(server_path: String) -> Result<bool, String> 
         return Ok(false);
     }
     let live = PathBuf::from(&server_path)
-        .join("Pal").join("Saved").join("Config").join("WindowsServer").join("PalWorldSettings.ini");
+        .join("Pal")
+        .join("Saved")
+        .join("Config")
+        .join("WindowsServer")
+        .join("PalWorldSettings.ini");
     if !live.exists() {
         return Ok(false);
     }
@@ -584,55 +635,447 @@ pub async fn is_config_initialized(server_path: String) -> Result<bool, String> 
 #[command]
 pub async fn get_config_descriptions() -> Result<Vec<ConfigValue>, String> {
     Ok(vec![
-        ConfigValue { name: "Difficulty".to_string(), value: "None".to_string(), description: "游戏难度".to_string(), field_type: "select".to_string(), min: None, max: None, step: None },
-        ConfigValue { name: "RandomizerType".to_string(), value: "None".to_string(), description: "随机化模式: None/Pal/Item/PalAndItem".to_string(), field_type: "select".to_string(), min: None, max: None, step: None },
-        ConfigValue { name: "DayTimeSpeedRate".to_string(), value: "1.0".to_string(), description: "白天时间速率".to_string(), field_type: "range".to_string(), min: Some(0.1), max: Some(5.0), step: Some(0.1) },
-        ConfigValue { name: "NightTimeSpeedRate".to_string(), value: "1.0".to_string(), description: "夜间时间速率".to_string(), field_type: "range".to_string(), min: Some(0.1), max: Some(5.0), step: Some(0.1) },
-        ConfigValue { name: "ExpRate".to_string(), value: "1.0".to_string(), description: "经验值倍率".to_string(), field_type: "range".to_string(), min: Some(0.1), max: Some(20.0), step: Some(0.1) },
-        ConfigValue { name: "PalCaptureRate".to_string(), value: "1.0".to_string(), description: "帕鲁捕获率".to_string(), field_type: "range".to_string(), min: Some(0.1), max: Some(10.0), step: Some(0.1) },
-        ConfigValue { name: "PalSpawnNumRate".to_string(), value: "1.0".to_string(), description: "帕鲁出现率（过高影响性能）".to_string(), field_type: "range".to_string(), min: Some(0.1), max: Some(5.0), step: Some(0.1) },
-        ConfigValue { name: "PalDamageRateAttack".to_string(), value: "1.0".to_string(), description: "帕鲁攻击伤害倍率".to_string(), field_type: "range".to_string(), min: Some(0.1), max: Some(5.0), step: Some(0.1) },
-        ConfigValue { name: "PalDamageRateDefense".to_string(), value: "1.0".to_string(), description: "对帕鲁的防御伤害倍率".to_string(), field_type: "range".to_string(), min: Some(0.1), max: Some(5.0), step: Some(0.1) },
-        ConfigValue { name: "PlayerDamageRateAttack".to_string(), value: "1.0".to_string(), description: "玩家攻击伤害倍率".to_string(), field_type: "range".to_string(), min: Some(0.1), max: Some(5.0), step: Some(0.1) },
-        ConfigValue { name: "PlayerDamageRateDefense".to_string(), value: "1.0".to_string(), description: "对玩家的防御伤害倍率".to_string(), field_type: "range".to_string(), min: Some(0.1), max: Some(5.0), step: Some(0.1) },
-        ConfigValue { name: "PlayerStomachDecreaceRate".to_string(), value: "1.0".to_string(), description: "玩家饥饿消耗率".to_string(), field_type: "range".to_string(), min: Some(0.1), max: Some(5.0), step: Some(0.1) },
-        ConfigValue { name: "PlayerStaminaDecreaceRate".to_string(), value: "1.0".to_string(), description: "玩家耐力消耗率".to_string(), field_type: "range".to_string(), min: Some(0.1), max: Some(5.0), step: Some(0.1) },
-        ConfigValue { name: "PlayerAutoHPRegeneRate".to_string(), value: "1.0".to_string(), description: "玩家自动HP恢复率".to_string(), field_type: "range".to_string(), min: Some(0.1), max: Some(5.0), step: Some(0.1) },
-        ConfigValue { name: "PlayerAutoHpRegeneRateInSleep".to_string(), value: "1.0".to_string(), description: "玩家睡眠HP恢复率".to_string(), field_type: "range".to_string(), min: Some(0.1), max: Some(5.0), step: Some(0.1) },
-        ConfigValue { name: "PalStomachDecreaceRate".to_string(), value: "1.0".to_string(), description: "帕鲁饥饿消耗率".to_string(), field_type: "range".to_string(), min: Some(0.1), max: Some(5.0), step: Some(0.1) },
-        ConfigValue { name: "PalStaminaDecreaceRate".to_string(), value: "1.0".to_string(), description: "帕鲁耐力消耗率".to_string(), field_type: "range".to_string(), min: Some(0.1), max: Some(5.0), step: Some(0.1) },
-        ConfigValue { name: "PalAutoHPRegeneRate".to_string(), value: "1.0".to_string(), description: "帕鲁自动HP恢复率".to_string(), field_type: "range".to_string(), min: Some(0.1), max: Some(5.0), step: Some(0.1) },
-        ConfigValue { name: "PalAutoHpRegeneRateInSleep".to_string(), value: "1.0".to_string(), description: "帕鲁睡眠HP恢复率".to_string(), field_type: "range".to_string(), min: Some(0.1), max: Some(5.0), step: Some(0.1) },
-        ConfigValue { name: "BuildObjectHpRate".to_string(), value: "1.0".to_string(), description: "建筑物HP倍率".to_string(), field_type: "range".to_string(), min: Some(0.1), max: Some(10.0), step: Some(0.1) },
-        ConfigValue { name: "BuildObjectDamageRate".to_string(), value: "1.0".to_string(), description: "建筑物伤害倍率（0=无敌）".to_string(), field_type: "range".to_string(), min: Some(0.0), max: Some(5.0), step: Some(0.1) },
-        ConfigValue { name: "BuildObjectDeteriorationDamageRate".to_string(), value: "1.0".to_string(), description: "建筑物损耗率（0=不劣化）".to_string(), field_type: "range".to_string(), min: Some(0.0), max: Some(5.0), step: Some(0.1) },
-        ConfigValue { name: "CollectionDropRate".to_string(), value: "1.0".to_string(), description: "采集物品掉落倍率".to_string(), field_type: "range".to_string(), min: Some(0.1), max: Some(10.0), step: Some(0.1) },
-        ConfigValue { name: "EnemyDropItemRate".to_string(), value: "1.0".to_string(), description: "敌人掉落物品倍率".to_string(), field_type: "range".to_string(), min: Some(0.1), max: Some(10.0), step: Some(0.1) },
-        ConfigValue { name: "DeathPenalty".to_string(), value: "Item".to_string(), description: "死亡惩罚: None/Item/ItemAndEquipment/All".to_string(), field_type: "select".to_string(), min: None, max: None, step: None },
-        ConfigValue { name: "WorkSpeedRate".to_string(), value: "1.0".to_string(), description: "工作速度倍率".to_string(), field_type: "range".to_string(), min: Some(0.1), max: Some(10.0), step: Some(0.1) },
-        ConfigValue { name: "PalEggDefaultHatchingTime".to_string(), value: "1.0".to_string(), description: "帕鲁蛋孵化时间（小时，0=即时）".to_string(), field_type: "range".to_string(), min: Some(0.0), max: Some(240.0), step: Some(0.1) },
-        ConfigValue { name: "AutoSaveSpan".to_string(), value: "30.0".to_string(), description: "自动保存间隔（秒）".to_string(), field_type: "range".to_string(), min: Some(10.0), max: Some(3600.0), step: Some(10.0) },
-        ConfigValue { name: "ItemWeightRate".to_string(), value: "1.0".to_string(), description: "物品重量倍率（越低背包越轻松）".to_string(), field_type: "range".to_string(), min: Some(0.1), max: Some(5.0), step: Some(0.1) },
-        ConfigValue { name: "EquipmentDurabilityDamageRate".to_string(), value: "1.0".to_string(), description: "装备耐久损耗倍率（0=不掉耐久）".to_string(), field_type: "range".to_string(), min: Some(0.0), max: Some(5.0), step: Some(0.1) },
-        ConfigValue { name: "DropItemMaxNum".to_string(), value: "3000".to_string(), description: "掉落物品最大数量".to_string(), field_type: "number".to_string(), min: Some(0.0), max: Some(10000.0), step: Some(100.0) },
-        ConfigValue { name: "BaseCampWorkerMaxNum".to_string(), value: "15".to_string(), description: "单个基地帕鲁数（最高50）".to_string(), field_type: "number".to_string(), min: Some(1.0), max: Some(50.0), step: Some(1.0) },
-        ConfigValue { name: "SupplyDropSpan".to_string(), value: "180".to_string(), description: "空投间隔（分钟）".to_string(), field_type: "number".to_string(), min: Some(0.0), max: Some(1440.0), step: Some(10.0) },
-        ConfigValue { name: "MaxBuildingLimitNum".to_string(), value: "0".to_string(), description: "建筑上限（0=无限）".to_string(), field_type: "number".to_string(), min: Some(0.0), max: Some(100000.0), step: Some(100.0) },
-        ConfigValue { name: "ServerPlayerMaxNum".to_string(), value: "32".to_string(), description: "服务器最大玩家数".to_string(), field_type: "number".to_string(), min: Some(1.0), max: Some(32.0), step: Some(1.0) },
-        ConfigValue { name: "ServerName".to_string(), value: "Default Palworld Server".to_string(), description: "服务器名称".to_string(), field_type: "text".to_string(), min: None, max: None, step: None },
-        ConfigValue { name: "ServerPassword".to_string(), value: "".to_string(), description: "服务器密码（留空无密码）".to_string(), field_type: "text".to_string(), min: None, max: None, step: None },
-        ConfigValue { name: "AdminPassword".to_string(), value: "".to_string(), description: "管理员密码".to_string(), field_type: "text".to_string(), min: None, max: None, step: None },
-        ConfigValue { name: "bIsPvP".to_string(), value: "False".to_string(), description: "PvP模式".to_string(), field_type: "toggle".to_string(), min: None, max: None, step: None },
-        ConfigValue { name: "bHardcore".to_string(), value: "False".to_string(), description: "硬核模式（死亡不可复活）".to_string(), field_type: "toggle".to_string(), min: None, max: None, step: None },
-        ConfigValue { name: "bEnableInvaderEnemy".to_string(), value: "True".to_string(), description: "启用入侵敌人（袭击事件）".to_string(), field_type: "toggle".to_string(), min: None, max: None, step: None },
-        ConfigValue { name: "bEnableFastTravel".to_string(), value: "True".to_string(), description: "启用快速旅行".to_string(), field_type: "toggle".to_string(), min: None, max: None, step: None },
-        ConfigValue { name: "bShowPlayerList".to_string(), value: "False".to_string(), description: "显示玩家列表".to_string(), field_type: "toggle".to_string(), min: None, max: None, step: None },
-        ConfigValue { name: "bIsUseBackupSaveData".to_string(), value: "True".to_string(), description: "启用自动备份存档".to_string(), field_type: "toggle".to_string(), min: None, max: None, step: None },
-        ConfigValue { name: "bEnableVoiceChat".to_string(), value: "False".to_string(), description: "启用语音聊天".to_string(), field_type: "toggle".to_string(), min: None, max: None, step: None },
-        ConfigValue { name: "bIsShowJoinLeftMessage".to_string(), value: "True".to_string(), description: "显示加入/退出消息".to_string(), field_type: "toggle".to_string(), min: None, max: None, step: None },
-        ConfigValue { name: "EnablePredatorBossPal".to_string(), value: "True".to_string(), description: "启用捕食者BOSS帕鲁".to_string(), field_type: "toggle".to_string(), min: None, max: None, step: None },
-        ConfigValue { name: "RCONEnabled".to_string(), value: "False".to_string(), description: "启用RCON远程管理".to_string(), field_type: "toggle".to_string(), min: None, max: None, step: None },
-        ConfigValue { name: "RESTAPIEnabled".to_string(), value: "False".to_string(), description: "启用REST API".to_string(), field_type: "toggle".to_string(), min: None, max: None, step: None },
+        ConfigValue {
+            name: "Difficulty".to_string(),
+            value: "None".to_string(),
+            description: "游戏难度".to_string(),
+            field_type: "select".to_string(),
+            min: None,
+            max: None,
+            step: None,
+        },
+        ConfigValue {
+            name: "RandomizerType".to_string(),
+            value: "None".to_string(),
+            description: "随机化模式: None/Pal/Item/PalAndItem".to_string(),
+            field_type: "select".to_string(),
+            min: None,
+            max: None,
+            step: None,
+        },
+        ConfigValue {
+            name: "DayTimeSpeedRate".to_string(),
+            value: "1.0".to_string(),
+            description: "白天时间速率".to_string(),
+            field_type: "range".to_string(),
+            min: Some(0.1),
+            max: Some(5.0),
+            step: Some(0.1),
+        },
+        ConfigValue {
+            name: "NightTimeSpeedRate".to_string(),
+            value: "1.0".to_string(),
+            description: "夜间时间速率".to_string(),
+            field_type: "range".to_string(),
+            min: Some(0.1),
+            max: Some(5.0),
+            step: Some(0.1),
+        },
+        ConfigValue {
+            name: "ExpRate".to_string(),
+            value: "1.0".to_string(),
+            description: "经验值倍率".to_string(),
+            field_type: "range".to_string(),
+            min: Some(0.1),
+            max: Some(20.0),
+            step: Some(0.1),
+        },
+        ConfigValue {
+            name: "PalCaptureRate".to_string(),
+            value: "1.0".to_string(),
+            description: "帕鲁捕获率".to_string(),
+            field_type: "range".to_string(),
+            min: Some(0.1),
+            max: Some(10.0),
+            step: Some(0.1),
+        },
+        ConfigValue {
+            name: "PalSpawnNumRate".to_string(),
+            value: "1.0".to_string(),
+            description: "帕鲁出现率（过高影响性能）".to_string(),
+            field_type: "range".to_string(),
+            min: Some(0.1),
+            max: Some(5.0),
+            step: Some(0.1),
+        },
+        ConfigValue {
+            name: "PalDamageRateAttack".to_string(),
+            value: "1.0".to_string(),
+            description: "帕鲁攻击伤害倍率".to_string(),
+            field_type: "range".to_string(),
+            min: Some(0.1),
+            max: Some(5.0),
+            step: Some(0.1),
+        },
+        ConfigValue {
+            name: "PalDamageRateDefense".to_string(),
+            value: "1.0".to_string(),
+            description: "对帕鲁的防御伤害倍率".to_string(),
+            field_type: "range".to_string(),
+            min: Some(0.1),
+            max: Some(5.0),
+            step: Some(0.1),
+        },
+        ConfigValue {
+            name: "PlayerDamageRateAttack".to_string(),
+            value: "1.0".to_string(),
+            description: "玩家攻击伤害倍率".to_string(),
+            field_type: "range".to_string(),
+            min: Some(0.1),
+            max: Some(5.0),
+            step: Some(0.1),
+        },
+        ConfigValue {
+            name: "PlayerDamageRateDefense".to_string(),
+            value: "1.0".to_string(),
+            description: "对玩家的防御伤害倍率".to_string(),
+            field_type: "range".to_string(),
+            min: Some(0.1),
+            max: Some(5.0),
+            step: Some(0.1),
+        },
+        ConfigValue {
+            name: "PlayerStomachDecreaceRate".to_string(),
+            value: "1.0".to_string(),
+            description: "玩家饥饿消耗率".to_string(),
+            field_type: "range".to_string(),
+            min: Some(0.1),
+            max: Some(5.0),
+            step: Some(0.1),
+        },
+        ConfigValue {
+            name: "PlayerStaminaDecreaceRate".to_string(),
+            value: "1.0".to_string(),
+            description: "玩家耐力消耗率".to_string(),
+            field_type: "range".to_string(),
+            min: Some(0.1),
+            max: Some(5.0),
+            step: Some(0.1),
+        },
+        ConfigValue {
+            name: "PlayerAutoHPRegeneRate".to_string(),
+            value: "1.0".to_string(),
+            description: "玩家自动HP恢复率".to_string(),
+            field_type: "range".to_string(),
+            min: Some(0.1),
+            max: Some(5.0),
+            step: Some(0.1),
+        },
+        ConfigValue {
+            name: "PlayerAutoHpRegeneRateInSleep".to_string(),
+            value: "1.0".to_string(),
+            description: "玩家睡眠HP恢复率".to_string(),
+            field_type: "range".to_string(),
+            min: Some(0.1),
+            max: Some(5.0),
+            step: Some(0.1),
+        },
+        ConfigValue {
+            name: "PalStomachDecreaceRate".to_string(),
+            value: "1.0".to_string(),
+            description: "帕鲁饥饿消耗率".to_string(),
+            field_type: "range".to_string(),
+            min: Some(0.1),
+            max: Some(5.0),
+            step: Some(0.1),
+        },
+        ConfigValue {
+            name: "PalStaminaDecreaceRate".to_string(),
+            value: "1.0".to_string(),
+            description: "帕鲁耐力消耗率".to_string(),
+            field_type: "range".to_string(),
+            min: Some(0.1),
+            max: Some(5.0),
+            step: Some(0.1),
+        },
+        ConfigValue {
+            name: "PalAutoHPRegeneRate".to_string(),
+            value: "1.0".to_string(),
+            description: "帕鲁自动HP恢复率".to_string(),
+            field_type: "range".to_string(),
+            min: Some(0.1),
+            max: Some(5.0),
+            step: Some(0.1),
+        },
+        ConfigValue {
+            name: "PalAutoHpRegeneRateInSleep".to_string(),
+            value: "1.0".to_string(),
+            description: "帕鲁睡眠HP恢复率".to_string(),
+            field_type: "range".to_string(),
+            min: Some(0.1),
+            max: Some(5.0),
+            step: Some(0.1),
+        },
+        ConfigValue {
+            name: "BuildObjectHpRate".to_string(),
+            value: "1.0".to_string(),
+            description: "建筑物HP倍率".to_string(),
+            field_type: "range".to_string(),
+            min: Some(0.1),
+            max: Some(10.0),
+            step: Some(0.1),
+        },
+        ConfigValue {
+            name: "BuildObjectDamageRate".to_string(),
+            value: "1.0".to_string(),
+            description: "建筑物伤害倍率（0=无敌）".to_string(),
+            field_type: "range".to_string(),
+            min: Some(0.0),
+            max: Some(5.0),
+            step: Some(0.1),
+        },
+        ConfigValue {
+            name: "BuildObjectDeteriorationDamageRate".to_string(),
+            value: "1.0".to_string(),
+            description: "建筑物损耗率（0=不劣化）".to_string(),
+            field_type: "range".to_string(),
+            min: Some(0.0),
+            max: Some(5.0),
+            step: Some(0.1),
+        },
+        ConfigValue {
+            name: "CollectionDropRate".to_string(),
+            value: "1.0".to_string(),
+            description: "采集物品掉落倍率".to_string(),
+            field_type: "range".to_string(),
+            min: Some(0.1),
+            max: Some(10.0),
+            step: Some(0.1),
+        },
+        ConfigValue {
+            name: "EnemyDropItemRate".to_string(),
+            value: "1.0".to_string(),
+            description: "敌人掉落物品倍率".to_string(),
+            field_type: "range".to_string(),
+            min: Some(0.1),
+            max: Some(10.0),
+            step: Some(0.1),
+        },
+        ConfigValue {
+            name: "DeathPenalty".to_string(),
+            value: "Item".to_string(),
+            description: "死亡惩罚: None/Item/ItemAndEquipment/All".to_string(),
+            field_type: "select".to_string(),
+            min: None,
+            max: None,
+            step: None,
+        },
+        ConfigValue {
+            name: "WorkSpeedRate".to_string(),
+            value: "1.0".to_string(),
+            description: "工作速度倍率".to_string(),
+            field_type: "range".to_string(),
+            min: Some(0.1),
+            max: Some(10.0),
+            step: Some(0.1),
+        },
+        ConfigValue {
+            name: "PalEggDefaultHatchingTime".to_string(),
+            value: "1.0".to_string(),
+            description: "帕鲁蛋孵化时间（小时，0=即时）".to_string(),
+            field_type: "range".to_string(),
+            min: Some(0.0),
+            max: Some(240.0),
+            step: Some(0.1),
+        },
+        ConfigValue {
+            name: "AutoSaveSpan".to_string(),
+            value: "30.0".to_string(),
+            description: "自动保存间隔（秒）".to_string(),
+            field_type: "range".to_string(),
+            min: Some(10.0),
+            max: Some(3600.0),
+            step: Some(10.0),
+        },
+        ConfigValue {
+            name: "ItemWeightRate".to_string(),
+            value: "1.0".to_string(),
+            description: "物品重量倍率（越低背包越轻松）".to_string(),
+            field_type: "range".to_string(),
+            min: Some(0.1),
+            max: Some(5.0),
+            step: Some(0.1),
+        },
+        ConfigValue {
+            name: "EquipmentDurabilityDamageRate".to_string(),
+            value: "1.0".to_string(),
+            description: "装备耐久损耗倍率（0=不掉耐久）".to_string(),
+            field_type: "range".to_string(),
+            min: Some(0.0),
+            max: Some(5.0),
+            step: Some(0.1),
+        },
+        ConfigValue {
+            name: "DropItemMaxNum".to_string(),
+            value: "3000".to_string(),
+            description: "掉落物品最大数量".to_string(),
+            field_type: "number".to_string(),
+            min: Some(0.0),
+            max: Some(10000.0),
+            step: Some(100.0),
+        },
+        ConfigValue {
+            name: "BaseCampWorkerMaxNum".to_string(),
+            value: "15".to_string(),
+            description: "单个基地帕鲁数（最高50）".to_string(),
+            field_type: "number".to_string(),
+            min: Some(1.0),
+            max: Some(50.0),
+            step: Some(1.0),
+        },
+        ConfigValue {
+            name: "SupplyDropSpan".to_string(),
+            value: "180".to_string(),
+            description: "空投间隔（分钟）".to_string(),
+            field_type: "number".to_string(),
+            min: Some(0.0),
+            max: Some(1440.0),
+            step: Some(10.0),
+        },
+        ConfigValue {
+            name: "MaxBuildingLimitNum".to_string(),
+            value: "0".to_string(),
+            description: "建筑上限（0=无限）".to_string(),
+            field_type: "number".to_string(),
+            min: Some(0.0),
+            max: Some(100000.0),
+            step: Some(100.0),
+        },
+        ConfigValue {
+            name: "ServerPlayerMaxNum".to_string(),
+            value: "32".to_string(),
+            description: "服务器最大玩家数".to_string(),
+            field_type: "number".to_string(),
+            min: Some(1.0),
+            max: Some(32.0),
+            step: Some(1.0),
+        },
+        ConfigValue {
+            name: "ServerName".to_string(),
+            value: "Default Palworld Server".to_string(),
+            description: "服务器名称".to_string(),
+            field_type: "text".to_string(),
+            min: None,
+            max: None,
+            step: None,
+        },
+        ConfigValue {
+            name: "ServerPassword".to_string(),
+            value: "".to_string(),
+            description: "服务器密码（留空无密码）".to_string(),
+            field_type: "text".to_string(),
+            min: None,
+            max: None,
+            step: None,
+        },
+        ConfigValue {
+            name: "AdminPassword".to_string(),
+            value: "".to_string(),
+            description: "管理员密码".to_string(),
+            field_type: "text".to_string(),
+            min: None,
+            max: None,
+            step: None,
+        },
+        ConfigValue {
+            name: "bIsPvP".to_string(),
+            value: "False".to_string(),
+            description: "PvP模式".to_string(),
+            field_type: "toggle".to_string(),
+            min: None,
+            max: None,
+            step: None,
+        },
+        ConfigValue {
+            name: "bHardcore".to_string(),
+            value: "False".to_string(),
+            description: "硬核模式（死亡不可复活）".to_string(),
+            field_type: "toggle".to_string(),
+            min: None,
+            max: None,
+            step: None,
+        },
+        ConfigValue {
+            name: "bEnableInvaderEnemy".to_string(),
+            value: "True".to_string(),
+            description: "启用入侵敌人（袭击事件）".to_string(),
+            field_type: "toggle".to_string(),
+            min: None,
+            max: None,
+            step: None,
+        },
+        ConfigValue {
+            name: "bEnableFastTravel".to_string(),
+            value: "True".to_string(),
+            description: "启用快速旅行".to_string(),
+            field_type: "toggle".to_string(),
+            min: None,
+            max: None,
+            step: None,
+        },
+        ConfigValue {
+            name: "bShowPlayerList".to_string(),
+            value: "False".to_string(),
+            description: "显示玩家列表".to_string(),
+            field_type: "toggle".to_string(),
+            min: None,
+            max: None,
+            step: None,
+        },
+        ConfigValue {
+            name: "bIsUseBackupSaveData".to_string(),
+            value: "True".to_string(),
+            description: "启用自动备份存档".to_string(),
+            field_type: "toggle".to_string(),
+            min: None,
+            max: None,
+            step: None,
+        },
+        ConfigValue {
+            name: "bEnableVoiceChat".to_string(),
+            value: "False".to_string(),
+            description: "启用语音聊天".to_string(),
+            field_type: "toggle".to_string(),
+            min: None,
+            max: None,
+            step: None,
+        },
+        ConfigValue {
+            name: "bIsShowJoinLeftMessage".to_string(),
+            value: "True".to_string(),
+            description: "显示加入/退出消息".to_string(),
+            field_type: "toggle".to_string(),
+            min: None,
+            max: None,
+            step: None,
+        },
+        ConfigValue {
+            name: "EnablePredatorBossPal".to_string(),
+            value: "True".to_string(),
+            description: "启用捕食者BOSS帕鲁".to_string(),
+            field_type: "toggle".to_string(),
+            min: None,
+            max: None,
+            step: None,
+        },
+        ConfigValue {
+            name: "RCONEnabled".to_string(),
+            value: "False".to_string(),
+            description: "启用RCON远程管理".to_string(),
+            field_type: "toggle".to_string(),
+            min: None,
+            max: None,
+            step: None,
+        },
+        ConfigValue {
+            name: "RESTAPIEnabled".to_string(),
+            value: "False".to_string(),
+            description: "启用REST API".to_string(),
+            field_type: "toggle".to_string(),
+            min: None,
+            max: None,
+            step: None,
+        },
     ])
 }
 
@@ -738,14 +1181,22 @@ mod tests {
 
     /// 拼接 live 配置文件路径（与 fill_default_config 内部一致）
     fn qa_live_path(sp: &std::path::Path) -> std::path::PathBuf {
-        sp.join("Pal").join("Saved").join("Config").join("WindowsServer").join("PalWorldSettings.ini")
+        sp.join("Pal")
+            .join("Saved")
+            .join("Config")
+            .join("WindowsServer")
+            .join("PalWorldSettings.ini")
     }
 
     #[test]
     fn fill_level_1_already_filled_does_not_write() {
         // ① live 已含 OptionSettings=( → already_filled，且不写盘
         let sp = make_qa_server_path("lvl1");
-        let ws = sp.join("Pal").join("Saved").join("Config").join("WindowsServer");
+        let ws = sp
+            .join("Pal")
+            .join("Saved")
+            .join("Config")
+            .join("WindowsServer");
         std::fs::create_dir_all(&ws).unwrap();
         let live = ws.join("PalWorldSettings.ini");
         let preset = "[/Script/Pal.PalGameWorldSettings]\nOptionSettings=(Difficulty=None,ServerName=\"X\")\n";
@@ -756,7 +1207,11 @@ mod tests {
             .expect("level1 不应报错");
         assert_eq!(res.status, "already_filled");
         // 关键：不得改写已填充的 live（内容不变 + mtime 不变）
-        assert_eq!(std::fs::read_to_string(&live).unwrap(), preset, "live 内容被意外改写");
+        assert_eq!(
+            std::fs::read_to_string(&live).unwrap(),
+            preset,
+            "live 内容被意外改写"
+        );
         assert_eq!(
             std::fs::metadata(&live).unwrap().modified().unwrap(),
             mtime_before,
@@ -783,7 +1238,11 @@ mod tests {
 
         let live = qa_live_path(&sp);
         assert!(live.exists(), "应从模板复制生成 live");
-        assert_eq!(std::fs::read_to_string(&live).unwrap(), tpl_content, "live 内容应与模板一致");
+        assert_eq!(
+            std::fs::read_to_string(&live).unwrap(),
+            tpl_content,
+            "live 内容应与模板一致"
+        );
 
         let _ = std::fs::remove_dir_all(&sp);
     }
@@ -802,7 +1261,10 @@ mod tests {
         let live = qa_live_path(&sp);
         assert!(live.exists(), "应已物化写入 live");
         let got = std::fs::read_to_string(&live).unwrap();
-        assert!(got.contains("OptionSettings=("), "写入内容应含 OptionSettings=(");
+        assert!(
+            got.contains("OptionSettings=("),
+            "写入内容应含 OptionSettings=("
+        );
         assert!(got.contains("Difficulty=None"), "写入内容应含内置默认值");
 
         let _ = std::fs::remove_dir_all(&sp);
@@ -818,7 +1280,11 @@ mod tests {
             Err(m) => m,
             Ok(_) => panic!("server_path 为空必须返回 Err，不能静默"),
         };
-        assert!(msg.contains("server_path"), "错误信息应指明 server_path 为空: {}", msg);
+        assert!(
+            msg.contains("server_path"),
+            "错误信息应指明 server_path 为空: {}",
+            msg
+        );
     }
 
     #[test]
@@ -830,7 +1296,9 @@ mod tests {
     #[test]
     fn is_config_initialized_missing_file_false() {
         let sp = make_qa_server_path("ici_missing");
-        let res = tauri::async_runtime::block_on(is_config_initialized(sp.to_string_lossy().into())).unwrap();
+        let res =
+            tauri::async_runtime::block_on(is_config_initialized(sp.to_string_lossy().into()))
+                .unwrap();
         assert!(!res, "live 文件不存在应返回 false");
         let _ = std::fs::remove_dir_all(&sp);
     }
@@ -838,10 +1306,20 @@ mod tests {
     #[test]
     fn is_config_initialized_no_option_settings_false() {
         let sp = make_qa_server_path("ici_noopt");
-        let ws = sp.join("Pal").join("Saved").join("Config").join("WindowsServer");
+        let ws = sp
+            .join("Pal")
+            .join("Saved")
+            .join("Config")
+            .join("WindowsServer");
         std::fs::create_dir_all(&ws).unwrap();
-        std::fs::write(ws.join("PalWorldSettings.ini"), "[/Script/Pal.PalGameWorldSettings]\nFoo=Bar\n").unwrap();
-        let res = tauri::async_runtime::block_on(is_config_initialized(sp.to_string_lossy().into())).unwrap();
+        std::fs::write(
+            ws.join("PalWorldSettings.ini"),
+            "[/Script/Pal.PalGameWorldSettings]\nFoo=Bar\n",
+        )
+        .unwrap();
+        let res =
+            tauri::async_runtime::block_on(is_config_initialized(sp.to_string_lossy().into()))
+                .unwrap();
         assert!(!res, "文件存在但不含 OptionSettings=( 应返回 false");
         let _ = std::fs::remove_dir_all(&sp);
     }
@@ -849,11 +1327,48 @@ mod tests {
     #[test]
     fn is_config_initialized_with_option_settings_true() {
         let sp = make_qa_server_path("ici_ok");
-        let ws = sp.join("Pal").join("Saved").join("Config").join("WindowsServer");
+        let ws = sp
+            .join("Pal")
+            .join("Saved")
+            .join("Config")
+            .join("WindowsServer");
         std::fs::create_dir_all(&ws).unwrap();
-        std::fs::write(ws.join("PalWorldSettings.ini"), "[/Script/Pal.PalGameWorldSettings]\nOptionSettings=(Difficulty=None)\n").unwrap();
-        let res = tauri::async_runtime::block_on(is_config_initialized(sp.to_string_lossy().into())).unwrap();
+        std::fs::write(
+            ws.join("PalWorldSettings.ini"),
+            "[/Script/Pal.PalGameWorldSettings]\nOptionSettings=(Difficulty=None)\n",
+        )
+        .unwrap();
+        let res =
+            tauri::async_runtime::block_on(is_config_initialized(sp.to_string_lossy().into()))
+                .unwrap();
         assert!(res, "文件存在且含 OptionSettings=( 应返回 true");
         let _ = std::fs::remove_dir_all(&sp);
+    }
+
+    #[test]
+    fn write_config_updates_selected_values_and_round_trips_unknown_options() {
+        let dir = make_qa_server_path("write_round_trip");
+        let path = dir.join("PalWorldSettings.ini");
+        std::fs::write(
+            &path,
+            "[/Script/Pal.PalGameWorldSettings]\nOptionSettings=(ExpRate=1.000000,UnknownFutureOption=KeepMe,ServerName=\"旧名称\")\n",
+        )
+        .unwrap();
+
+        let mut config = read_config_from_file(path.to_str().unwrap()).unwrap();
+        config.insert("ExpRate".to_string(), "1.300000".to_string());
+        config.insert("ServerName".to_string(), "\"新名称\"".to_string());
+        tauri::async_runtime::block_on(write_config(path.to_string_lossy().into(), config))
+            .expect("副本配置应可写入");
+
+        let reloaded = read_config_from_file(path.to_str().unwrap()).expect("写入结果应可重新解析");
+        assert_eq!(reloaded.get("ExpRate"), Some(&"1.300000".to_string()));
+        assert_eq!(reloaded.get("ServerName"), Some(&"\"新名称\"".to_string()));
+        assert_eq!(
+            reloaded.get("UnknownFutureOption"),
+            Some(&"KeepMe".to_string())
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -195,15 +195,15 @@ pub fn transfer_character_impl(req: &TransferRequest) -> Result<EditResult, Stri
             let mut file = SavFile::load(&src_player)?;
             file.replace_guid_bytes(&old_bytes, &new_bytes);
             file.save(&dst_player)?;
-            SavFile::load(&dst_player)
-                .map_err(|e| format!("写回玩家存档校验失败: {}", e))?;
+            SavFile::load(&dst_player).map_err(|e| format!("写回玩家存档校验失败: {}", e))?;
         }
 
         // 2) Level.sav 联动（尽力而为）
         let src_level = src_data.join("Level.sav");
         let tgt_level = tgt_data.join("Level.sav");
         if src_level.is_file() && tgt_level.is_file() {
-            if let Err(e) = link_character_in_level(&src_level, &tgt_level, &old_bytes, &new_bytes) {
+            if let Err(e) = link_character_in_level(&src_level, &tgt_level, &old_bytes, &new_bytes)
+            {
                 warnings.push(format!(
                     "角色 {} 已拷贝，但 Level.sav 联动未完成: {}",
                     old_guid, e

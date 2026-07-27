@@ -11,6 +11,9 @@ dist-verify/
 .build_qa_verify/
 target/
 src-tauri/target/
+Palworld/src-tauri/target*/
+Palworld/output/
+Palworld/src-tauri/hints_raw.txt
 *.tsbuildinfo
 vite.config.ts.timestamp-*.mjs
 

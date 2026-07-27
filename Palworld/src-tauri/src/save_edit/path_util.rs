@@ -71,7 +71,10 @@ pub fn resolve_save_games_root() -> Result<(PathBuf, bool), String> {
     let dynamic = crate::steam_detect::detect_steam_library_roots();
     // 仅当动态探测完全失败时才回退到写死兜底（不在主探测路径）
     let fallback: Vec<std::path::PathBuf> = if dynamic.is_empty() {
-        STEAM_LIBRARY_ROOTS.iter().map(std::path::PathBuf::from).collect()
+        STEAM_LIBRARY_ROOTS
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect()
     } else {
         dynamic
     };
@@ -202,8 +205,7 @@ pub fn world_dir_with_root(world: &str, save_root: &Path) -> Result<PathBuf, Str
 /// 解析世界数据层目录（含 Level.sav，save_root 可注入便于测试）。
 pub fn world_data_dir_with_root(world: &str, save_root: &Path) -> Result<PathBuf, String> {
     let dir = world_dir_with_root(world, save_root)?;
-    find_world_data_dir(&dir)
-        .ok_or_else(|| format!("未找到世界数据(Level.sav)：{}", dir.display()))
+    find_world_data_dir(&dir).ok_or_else(|| format!("未找到世界数据(Level.sav)：{}", dir.display()))
 }
 
 /// 解析世界目录绝对路径（world 名经白名单校验）。
@@ -219,6 +221,7 @@ pub fn world_data_dir(world: &str) -> Result<PathBuf, String> {
 }
 
 /// 解析玩家角色存档绝对路径（Players/<guid>.sav），兼容扁平/GUID 嵌套。
+#[allow(dead_code)] // Retained for the legacy single-player command contract.
 pub fn player_sav_path(world: &str, guid: &str) -> Result<PathBuf, String> {
     let g = normalize_player_guid(guid)
         .ok_or_else(|| "角色 GUID 非法（仅允许字母/数字/下划线/点/连字符）".to_string())?;
@@ -242,8 +245,7 @@ pub fn copy_dir_recursive(src: &Path, dst: &Path, counter: &mut usize) -> Result
     if !src.is_dir() {
         return Err(format!("源目录不存在: {}", src.display()));
     }
-    std::fs::create_dir_all(dst)
-        .map_err(|e| format!("创建 {} 失败: {}", dst.display(), e))?;
+    std::fs::create_dir_all(dst).map_err(|e| format!("创建 {} 失败: {}", dst.display(), e))?;
     let entries =
         std::fs::read_dir(src).map_err(|e| format!("读取 {} 失败: {}", src.display(), e))?;
     for entry in entries.flatten() {
@@ -406,10 +408,7 @@ mod tests {
         let root = tmp_dir("t04_penetrate");
         let (local_root, data_dir) = make_local_sample(&root);
         let found = find_world_data_dir(&local_root);
-        assert!(
-            found.is_some(),
-            "应能穿透 2 层定位到含 Level.sav 的数据层"
-        );
+        assert!(found.is_some(), "应能穿透 2 层定位到含 Level.sav 的数据层");
         let d = found.unwrap();
         assert_eq!(d, data_dir, "定位结果应等于 GUID 数据层");
         assert!(d.join("Level.sav").is_file());
@@ -431,9 +430,7 @@ mod tests {
         assert_eq!(src, data_dir);
 
         // 目标：模拟专用服 0/<GUID> 数据层（world_data_dir 的解析结果，不依赖真实根）
-        let tgt = root
-            .join("0")
-            .join("A1B2C3D4-0000-1111-2222-333344445555");
+        let tgt = root.join("0").join("A1B2C3D4-0000-1111-2222-333344445555");
         let mut copied = 0usize;
         copy_dir_recursive(&src, &tgt, &mut copied).unwrap();
 

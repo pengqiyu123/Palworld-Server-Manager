@@ -12,8 +12,8 @@ import { reactive } from 'vue'
 export interface TooltipState {
   /** 是否可见 */
   visible: boolean
-  /** 允许内联 HTML（原型 data-tip 原文） */
-  html: string
+  /** 只允许纯文本，避免把外部描述送入 HTML 解析器。 */
+  text: string
   /** 视口坐标 */
   x: number
   y: number
@@ -37,7 +37,7 @@ export interface WizardState {
 export const useUiStore = defineStore('ui', () => {
   const tooltip = reactive<TooltipState>({
     visible: false,
-    html: '',
+    text: '',
     x: 0,
     y: 0,
   })
@@ -52,9 +52,9 @@ export const useUiStore = defineStore('ui', () => {
   })
 
   /** 显示浮动 tooltip（由 InfoTip 的鼠标锚点坐标驱动） */
-  function setTooltip(visible: boolean, html: string, x: number, y: number): void {
+  function setTooltip(visible: boolean, text: string, x: number, y: number): void {
     tooltip.visible = visible
-    tooltip.html = html
+    tooltip.text = text
     tooltip.x = x
     tooltip.y = y
   }

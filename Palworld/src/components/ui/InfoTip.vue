@@ -14,8 +14,8 @@ import AppIcon from './AppIcon.vue'
 
 /** ⓘ 触发按钮：鼠标悬停时计算锚点坐标并写入全局 tooltip 状态 */
 const props = defineProps<{
-  /** 气泡内联 HTML（原型 data-tip 原文） */
-  html: string
+  /** 气泡纯文本，换行由 Tooltip 的 white-space 样式呈现。 */
+  text: string
 }>()
 
 const uiStore = useUiStore()
@@ -35,7 +35,7 @@ function onEnter(e: MouseEvent): void {
     left = r.left - tw - 10
   }
   const top = r.top + r.height / 2
-  uiStore.setTooltip(true, props.html, left, top)
+  uiStore.setTooltip(true, props.text, left, top)
 }
 
 function onLeave(): void {

@@ -5,23 +5,26 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use crate::rcon::RconState;
 use tauri::{command, Emitter, State};
 use windows::core::w;
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, STILL_ACTIVE};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_SHARE_READ, FILE_SHARE_WRITE,
     OPEN_EXISTING,
 };
 use windows::Win32::System::Console::{
-    AttachConsole, COORD, CONSOLE_SCREEN_BUFFER_INFO, FreeConsole, GetConsoleScreenBufferInfo,
-    GetConsoleWindow, ReadConsoleOutputCharacterW,
+    AttachConsole, FreeConsole, GetConsoleScreenBufferInfo, GetConsoleWindow,
+    ReadConsoleOutputCharacterW, CONSOLE_SCREEN_BUFFER_INFO, COORD,
+};
+use windows::Win32::System::Threading::{
+    GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ServerStatus {
     pub running: bool,
+    pub ready: bool,
     pub pid: Option<u32>,
     pub managed_by_app: bool,
     pub server_path: String,
@@ -111,13 +114,8 @@ fn read_visible_console_lines(console: HANDLE) -> Result<Vec<String>, String> {
         for y in top..=bottom {
             let mut buffer = vec![0_u16; width];
             let mut read = 0_u32;
-            ReadConsoleOutputCharacterW(
-                console,
-                &mut buffer,
-                COORD { X: 0, Y: y },
-                &mut read,
-            )
-            .map_err(|error| format!("读取服务器控制台日志失败: {}", error))?;
+            ReadConsoleOutputCharacterW(console, &mut buffer, COORD { X: 0, Y: y }, &mut read)
+                .map_err(|error| format!("读取服务器控制台日志失败: {}", error))?;
             let line = String::from_utf16_lossy(&buffer[..read as usize])
                 .trim()
                 .to_string();
@@ -177,13 +175,17 @@ fn stream_server_console_logs(
             let _ = FreeConsole();
         }
         add_server_log(&logs, &app, "[INFO] 服务器进程已退出".to_string());
-        let _ = app.emit("server-status-change", ServerStatus {
-            running: false,
-            pid: None,
-            managed_by_app: false,
-            server_path,
-            log_count: logs.lock().unwrap().len(),
-        });
+        let _ = app.emit(
+            "server-status-change",
+            ServerStatus {
+                running: false,
+                ready: false,
+                pid: None,
+                managed_by_app: false,
+                server_path,
+                log_count: logs.lock().unwrap().len(),
+            },
+        );
     });
 }
 
@@ -228,7 +230,7 @@ fn normalize_windows_path(path: &Path) -> String {
 
 /// 查找已由用户或其他管理器启动、但路径与当前配置相符的 PalServer。
 /// 这样不会把该进程占用的 UDP 端口误判为冲突后再重复启动一次。
-fn find_existing_server_pid(server_path: &str) -> Option<u32> {
+fn find_existing_server_pids(server_path: &str) -> Vec<u32> {
     let candidates = [
         Path::new(server_path)
             .join("Pal")
@@ -237,38 +239,96 @@ fn find_existing_server_pid(server_path: &str) -> Option<u32> {
             .join("PalServer-Win64-Shipping-Cmd.exe"),
         Path::new(server_path).join("PalServer.exe"),
     ];
-    let expected: Vec<String> = candidates.iter().map(|path| normalize_windows_path(path)).collect();
+    let expected: Vec<String> = candidates
+        .iter()
+        .map(|path| normalize_windows_path(path))
+        .collect();
     let script = "Get-CimInstance Win32_Process -Filter \"Name = 'PalServer-Win64-Shipping-Cmd.exe' OR Name = 'PalServer.exe'\" | Select-Object ProcessId, ExecutablePath | ConvertTo-Json -Compress";
-    let output = Command::new("powershell")
+    let Ok(output) = Command::new("powershell")
         .args(["-NoProfile", "-Command", script])
         .output()
-        .ok()?;
+    else {
+        return Vec::new();
+    };
     let raw = String::from_utf8_lossy(&output.stdout);
-    let json: serde_json::Value = serde_json::from_str(raw.trim()).ok()?;
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(raw.trim()) else {
+        return Vec::new();
+    };
     let processes: Vec<WindowsProcess> = if json.is_array() {
-        serde_json::from_value(json).ok()?
+        serde_json::from_value(json).unwrap_or_default()
     } else {
-        vec![serde_json::from_value(json).ok()?]
+        serde_json::from_value(json)
+            .map(|process| vec![process])
+            .unwrap_or_default()
     };
 
-    processes.into_iter().find_map(|process| {
-        let executable = process.executable_path?;
-        expected
-            .iter()
-            .any(|path| *path == normalize_windows_path(Path::new(&executable)))
-            .then_some(process.process_id)
-    })
+    processes
+        .into_iter()
+        .filter_map(|process| {
+            let executable = process.executable_path?;
+            expected
+                .iter()
+                .any(|path| *path == normalize_windows_path(Path::new(&executable)))
+                .then_some(process.process_id)
+        })
+        .collect()
+}
+
+fn find_existing_server_pid(server_path: &str) -> Option<u32> {
+    let matching_pids = find_existing_server_pids(server_path);
+
+    matching_pids
+        .iter()
+        .copied()
+        .find(|pid| has_udp_binding(*pid, PAL_SERVER_UDP_PORT))
+        .or_else(|| matching_pids.first().copied())
 }
 
 fn is_process_running(pid: u32) -> bool {
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        let mut exit_code = 0u32;
+        let running = GetExitCodeProcess(handle, &mut exit_code).is_ok()
+            && exit_code == STILL_ACTIVE.0 as u32;
+        let _ = CloseHandle(handle);
+        running
+    }
+}
+
+#[cfg(test)]
+pub fn is_palworld_game_process_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "palworld.exe" | "palworld-win64-shipping.exe"
+    )
+}
+
+fn is_image_running(image_name: &str) -> bool {
     Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {}", pid), "/FO", "CSV", "/NH"])
+        .args([
+            "/FI",
+            &format!("IMAGENAME eq {}", image_name),
+            "/FO",
+            "CSV",
+            "/NH",
+        ])
         .output()
         .map(|output| {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            !stdout.trim().is_empty() && !stdout.contains("INFO: No tasks")
+            let expected = format!("\"{}\"", image_name).to_ascii_lowercase();
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line.trim().to_ascii_lowercase().starts_with(&expected))
         })
         .unwrap_or(false)
+}
+
+/// 存档写入期间游戏客户端也必须关闭，否则客户端退出时可能覆盖角色文件。
+pub fn is_palworld_game_running() -> bool {
+    ["Palworld.exe", "Palworld-Win64-Shipping.exe"]
+        .iter()
+        .any(|name| is_image_running(name))
 }
 
 fn has_udp_binding(pid: u32, port: u16) -> bool {
@@ -315,18 +375,26 @@ pub fn is_server_process_running(state: &ServerState) -> bool {
         return true;
     }
 
-    let mut external_pid = state.external_pid.lock().unwrap();
-    if let Some(pid) = *external_pid {
-        if is_process_running(pid) {
-            return true;
-        }
-        *external_pid = None;
-    }
-    false
+    let server_path = state.server_path.lock().unwrap().clone();
+    let detected_pid = if server_path.trim().is_empty() {
+        None
+    } else {
+        find_existing_server_pid(&server_path)
+    };
+    let tracked_pid = *state.external_pid.lock().unwrap();
+    let current_pid = detected_pid.or_else(|| tracked_pid.filter(|pid| is_process_running(*pid)));
+    *state.external_pid.lock().unwrap() = current_pid;
+    current_pid.is_some()
 }
 
 fn current_server_pid(state: &ServerState) -> Option<u32> {
-    if let Some(pid) = state.process.lock().unwrap().as_ref().map(|process| process.id()) {
+    if let Some(pid) = state
+        .process
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|process| process.id())
+    {
         return Some(pid);
     }
     *state.external_pid.lock().unwrap()
@@ -348,12 +416,22 @@ fn take_server_process(
 fn force_terminate_server_process(
     process_option: Option<std::process::Child>,
     external_pid: Option<u32>,
+    server_path: &str,
 ) -> Result<(), String> {
     if let Some(mut child) = process_option {
         let _ = child.kill();
         let _ = child.wait();
     }
+    let mut external_pids = find_existing_server_pids(server_path);
     if let Some(pid) = external_pid {
+        external_pids.push(pid);
+    }
+    external_pids.sort_unstable();
+    external_pids.dedup();
+    for pid in external_pids {
+        if !is_process_running(pid) {
+            continue;
+        }
         let status = Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .status()
@@ -368,11 +446,15 @@ fn force_terminate_server_process(
 fn build_server_status(state: &ServerState) -> ServerStatus {
     let running = is_server_process_running(state);
     let pid = running.then(|| current_server_pid(state)).flatten();
+    let ready = pid
+        .map(|process_id| has_udp_binding(process_id, PAL_SERVER_UDP_PORT))
+        .unwrap_or(false);
     let managed_by_app = running && state.process.lock().unwrap().is_some();
     let server_path = state.server_path.lock().unwrap().clone();
     let log_count = state.logs.lock().unwrap().len();
     ServerStatus {
         running,
+        ready,
         pid,
         managed_by_app,
         server_path,
@@ -427,9 +509,7 @@ pub async fn start_server(
     if source_tag == "cmd" {
         command.creation_flags(CREATE_NEW_CONSOLE);
     }
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("启动失败: {}", e))?;
+    let mut child = command.spawn().map_err(|e| format!("启动失败: {}", e))?;
 
     if source_tag == "cmd" {
         stream_server_console_logs(
@@ -462,33 +542,34 @@ pub async fn start_server(
 
 #[command]
 pub async fn force_stop_server(state: State<'_, ServerState>) -> Result<ServerStatus, String> {
+    let server_path = state.server_path.lock().unwrap().clone();
     let (process_option, external_pid) = take_server_process(&state)?;
-    force_terminate_server_process(process_option, external_pid)?;
+    force_terminate_server_process(process_option, external_pid, &server_path)?;
     Ok(build_server_status(&state))
 }
 
 #[command]
-pub async fn stop_server(
-    state: State<'_, ServerState>,
-    rcon_state: State<'_, RconState>,
-) -> Result<ServerStatus, String> {
-    let (process_option, external_pid) = take_server_process(&state)?;
-
-    // 尝试优雅关机：如果 RCON 已连接，先发送 Shutdown 命令
-    // 仅在发送命令期间持有 RconState 锁，发送完立即释放，避免阻塞其它 RCON 命令
-    {
-        let mut rcon = rcon_state.client.lock().await;
-        if rcon.is_connected() {
-            let _ = rcon.send_command("Shutdown").await;
-        }
+pub async fn stop_server(state: State<'_, ServerState>) -> Result<ServerStatus, String> {
+    let server_path = state.server_path.lock().unwrap().clone();
+    if !is_server_process_running(&state) {
+        return Err("服务器未运行".to_string());
     }
 
-    // 给几秒让服务器保存存档；此刻不持有任何锁，避免阻塞 get_server_status / rcon_send_command
-    std::thread::sleep(std::time::Duration::from_secs(3));
+    crate::rest_proxy::rest_shutdown(server_path, 5, "服务器正在保存并关闭，请稍候".to_string())
+        .await
+        .map_err(|error| format!("优雅关服请求失败：{error}。可改用“强制停止”"))?;
 
-    force_terminate_server_process(process_option, external_pid)?;
+    for _ in 0..60 {
+        if !is_server_process_running(&state) {
+            return Ok(build_server_status(&state));
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 
-    Ok(build_server_status(&state))
+    Err(
+        "服务器已收到关服请求，但 15 秒内仍未退出。请稍后刷新状态，必要时使用“强制停止”"
+            .to_string(),
+    )
 }
 
 #[command]
@@ -516,14 +597,31 @@ pub fn export_server_logs(path: String, state: State<'_, ServerState>) -> Result
     let content = logs.join("\n");
     let count = logs.len();
     drop(logs);
-    std::fs::write(&path, content)
-        .map_err(|e| format!("导出日志失败: {}", e))?;
+    std::fs::write(&path, content).map_err(|e| format!("导出日志失败: {}", e))?;
     Ok(count)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normal_stop_uses_rest_shutdown_without_force_termination() {
+        let source = include_str!("server.rs");
+        let stop_start = source
+            .find("pub async fn stop_server")
+            .expect("stop_server should exist");
+        let status_start = source[stop_start..]
+            .find("pub async fn get_server_status")
+            .map(|offset| stop_start + offset)
+            .expect("get_server_status should follow stop_server");
+        let stop_source = &source[stop_start..status_start];
+
+        assert!(stop_source.contains("rest_shutdown"));
+        assert!(stop_source.contains("is_server_process_running"));
+        assert!(!stop_source.contains("force_terminate_server_process"));
+        assert!(!stop_source.contains("std::thread::sleep"));
+    }
 
     #[test]
     fn server_launch_args_start_console_server_mode() {
@@ -547,5 +645,98 @@ mod tests {
             console_line_delta(&previous, &current),
             vec!["Running Palworld dedicated server on :8211".to_string()]
         );
+    }
+
+    #[test]
+    fn game_process_matcher_covers_palworld_client_binaries_only() {
+        assert!(is_palworld_game_process_name("Palworld.exe"));
+        assert!(is_palworld_game_process_name("Palworld-Win64-Shipping.exe"));
+        assert!(!is_palworld_game_process_name("PalServer.exe"));
+        assert!(!is_palworld_game_process_name(
+            "PalServer-Win64-Shipping-Cmd.exe"
+        ));
+    }
+
+    #[test]
+    fn live_status_reconciles_servers_started_outside_the_app() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .expect("clock must be after unix epoch")
+            .as_nanos();
+        let server_dir = std::env::temp_dir().join(format!("palserver-status-test-{unique}"));
+        std::fs::create_dir_all(&server_dir).expect("create test server directory");
+        let source_cmd = PathBuf::from(std::env::var("SystemRoot").expect("SystemRoot must exist"))
+            .join("System32")
+            .join("cmd.exe");
+        let fake_server = server_dir.join("PalServer.exe");
+        std::fs::copy(source_cmd, &fake_server).expect("copy harmless process fixture");
+
+        let mut child = Command::new(&fake_server)
+            .args(["/c", "ping -t 127.0.0.1 > nul"])
+            .spawn()
+            .expect("start harmless external process fixture");
+        std::thread::sleep(Duration::from_millis(350));
+        let state = ServerState {
+            process: Mutex::new(None),
+            external_pid: Mutex::new(None),
+            server_path: Mutex::new(server_dir.to_string_lossy().into_owned()),
+            logs: Arc::new(Mutex::new(Vec::new())),
+        };
+
+        let detected = is_server_process_running(&state);
+        let detected_pid = *state.external_pid.lock().unwrap();
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&server_dir);
+
+        assert!(detected);
+        assert_eq!(detected_pid, Some(child.id()));
+    }
+
+    #[test]
+    fn process_probe_does_not_depend_on_localized_tasklist_messages() {
+        let source = include_str!("server.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("server.rs must contain production code before its tests");
+
+        assert!(!production_source.contains("INFO: No tasks"));
+        assert!(production_source.contains("OpenProcess"));
+    }
+
+    #[test]
+    fn force_stop_terminates_a_path_matched_external_server_process() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .expect("clock must be after unix epoch")
+            .as_nanos();
+        let server_dir = std::env::temp_dir().join(format!("palserver-process-test-{unique}"));
+        std::fs::create_dir_all(&server_dir).expect("create test server directory");
+        let source_cmd = PathBuf::from(std::env::var("SystemRoot").expect("SystemRoot must exist"))
+            .join("System32")
+            .join("cmd.exe");
+        let fake_server = server_dir.join("PalServer.exe");
+        std::fs::copy(source_cmd, &fake_server).expect("copy harmless process fixture");
+
+        let mut child = Command::new(&fake_server)
+            .args(["/c", "ping -t 127.0.0.1 > nul"])
+            .spawn()
+            .expect("start harmless external process fixture");
+        std::thread::sleep(Duration::from_millis(350));
+
+        let result = force_terminate_server_process(
+            None,
+            Some(child.id()),
+            server_dir.to_str().expect("test path must be UTF-8"),
+        );
+        if result.is_err() {
+            let _ = child.kill();
+        }
+
+        assert!(result.is_ok(), "force stop failed: {result:?}");
+        assert!(!is_process_running(child.id()));
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(server_dir);
     }
 }

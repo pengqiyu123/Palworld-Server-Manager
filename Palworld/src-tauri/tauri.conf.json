@@ -12,12 +12,18 @@
   "app": {
     "windows": [],
     "security": {
-      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:5222; script-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:5222; style-src 'self' 'unsafe-inline' http://localhost:5222; img-src 'self' data: http://localhost:5222; connect-src 'self' http://localhost:5222 ws://localhost:5222;",
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost;",
+      "devCsp": "default-src 'self' http://localhost:5222; script-src 'self' http://localhost:5222; style-src 'self' 'unsafe-inline' http://localhost:5222; img-src 'self' data: http://localhost:5222; connect-src 'self' ipc: http://ipc.localhost http://localhost:5222 ws://localhost:5222;",
       "capabilities": ["default"]
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"]
+    "targets": ["nsis"],
+    "windows": {
+      "nsis": {
+        "installerHooks": "nsis/installer-hooks.nsh"
+      }
+    }
   }
 }

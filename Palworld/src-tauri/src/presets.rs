@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
 use tauri::command;
 
 // ==================== 预设管理 ====================
@@ -22,27 +21,15 @@ struct PresetEntry {
     description: String,
 }
 
-/// 获取 presets 目录绝对路径
-/// 优先使用可执行文件同级目录，回退到 CARGO_MANIFEST_DIR（开发模式）
-fn presets_dir() -> PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            let dir = parent.join("presets");
-            if dir.exists() {
-                return dir;
-            }
-        }
-    }
-    // 开发模式回退：src-tauri/presets
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("presets")
-}
-
-/// 读取指定预设文件，返回 (Vec<PresetEntry>, 预设总描述)
+/// 预设编译进程序，发布时不依赖可执行文件旁的外部 JSON。
 fn load_preset_file(name: &str) -> Result<(Vec<PresetEntry>, String), String> {
-    let path = presets_dir().join(format!("{}.json", name));
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("读取预设文件失败 [{}]: {}", path.display(), e))?;
-    let entries: Vec<PresetEntry> = serde_json::from_str(&content)
+    let content = match name {
+        "casual" => include_str!("../presets/casual.json"),
+        "normal" => include_str!("../presets/normal.json"),
+        "challenge" => include_str!("../presets/challenge.json"),
+        _ => return Err(format!("未知配置预设: {}", name)),
+    };
+    let entries: Vec<PresetEntry> = serde_json::from_str(content)
         .map_err(|e| format!("解析预设 JSON 失败 [{}]: {}", name, e))?;
     // 总描述：取前 3 项 description 拼接，避免过长
     let description = entries
@@ -56,12 +43,11 @@ fn load_preset_file(name: &str) -> Result<(Vec<PresetEntry>, String), String> {
 
 #[command]
 pub fn list_presets() -> Result<Vec<PresetMeta>, String> {
-    // 内置预设清单（名称 → 文件名）
+    // 面向新手的三档体验，数值来自 docs/palworld-difficulty-presets-research.md。
     let builtin = vec![
-        ("默认", "default"),
-        ("PvE 友好", "pve-friendly"),
-        ("PvP 竞技", "pvp-competitive"),
-        ("速通", "speedrun"),
+        ("休闲", "casual"),
+        ("正常", "normal"),
+        ("挑战", "challenge"),
     ];
 
     let mut result = Vec::new();
@@ -97,4 +83,58 @@ pub fn apply_preset(
         merged.insert(entry.name, entry.value);
     }
     Ok(merged)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn beginner_presets_are_available_and_preserve_unrelated_options() {
+        let presets = list_presets().expect("内置预设应可加载");
+        let names: Vec<&str> = presets.iter().map(|preset| preset.name.as_str()).collect();
+        assert_eq!(names, vec!["casual", "normal", "challenge"]);
+
+        let mut existing = HashMap::new();
+        existing.insert("ServerName".to_string(), "\"好友世界\"".to_string());
+        existing.insert("UnknownFutureOption".to_string(), "KeepMe".to_string());
+
+        let merged = apply_preset("casual".to_string(), existing).expect("休闲预设应可套用");
+        assert_eq!(merged.get("Difficulty"), Some(&"None".to_string()));
+        assert_eq!(merged.get("ExpRate"), Some(&"1.800000".to_string()));
+        assert_eq!(
+            merged.get("PalEggDefaultHatchingTime"),
+            Some(&"0.000000".to_string())
+        );
+        assert_eq!(merged.get("BaseCampWorkerMaxNum"), Some(&"50".to_string()));
+        assert_eq!(
+            merged.get("UnknownFutureOption"),
+            Some(&"KeepMe".to_string())
+        );
+
+        let normal = apply_preset("normal".to_string(), HashMap::new()).expect("正常预设应可套用");
+        assert_eq!(normal.get("Difficulty"), Some(&"None".to_string()));
+        assert_eq!(normal.get("ExpRate"), Some(&"1.200000".to_string()));
+        assert_eq!(
+            normal.get("DeathPenalty"),
+            Some(&"ItemAndEquipment".to_string())
+        );
+        assert_eq!(normal.get("BaseCampWorkerMaxNum"), Some(&"25".to_string()));
+
+        let challenge =
+            apply_preset("challenge".to_string(), HashMap::new()).expect("挑战预设应可套用");
+        assert_eq!(challenge.get("Difficulty"), Some(&"None".to_string()));
+        assert_eq!(
+            challenge.get("PalCaptureRate"),
+            Some(&"0.700000".to_string())
+        );
+        assert_eq!(
+            challenge.get("PlayerDamageRateDefense"),
+            Some(&"1.500000".to_string())
+        );
+        assert_eq!(
+            challenge.get("bEnableFriendlyFire"),
+            Some(&"True".to_string())
+        );
+    }
 }

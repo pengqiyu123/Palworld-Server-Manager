@@ -38,10 +38,7 @@ pub fn parse_library_roots(vdf_text: &str) -> Vec<String> {
         }
 
         // 按引号切分，过滤掉空片段（含纯空白分隔符），得到 [key, value, ...]
-        let parts: Vec<&str> = line
-            .split('"')
-            .filter(|s| !s.trim().is_empty())
-            .collect();
+        let parts: Vec<&str> = line.split('"').filter(|s| !s.trim().is_empty()).collect();
         if parts.len() < 2 {
             continue;
         }
@@ -124,7 +121,10 @@ pub fn detect_steam_library_roots() -> Vec<PathBuf> {
         None => return roots,
     };
     roots.push(PathBuf::from(&steam_root));
-    for vdf_rel in ["steamapps\\libraryfolders.vdf", "config\\libraryfolders.vdf"] {
+    for vdf_rel in [
+        "steamapps\\libraryfolders.vdf",
+        "config\\libraryfolders.vdf",
+    ] {
         let vdf_path = Path::new(&steam_root).join(vdf_rel);
         if let Ok(text) = std::fs::read_to_string(&vdf_path) {
             for r in parse_library_roots(&text) {
@@ -160,7 +160,10 @@ pub async fn detect_palserver_path() -> Vec<String> {
     candidate_roots.push(steam_root.clone());
 
     // 两处 VDF 都查：steamapps 下与 config 下
-    for vdf_rel in ["steamapps\\libraryfolders.vdf", "config\\libraryfolders.vdf"] {
+    for vdf_rel in [
+        "steamapps\\libraryfolders.vdf",
+        "config\\libraryfolders.vdf",
+    ] {
         let vdf_path = Path::new(&steam_root).join(vdf_rel);
         if let Ok(text) = std::fs::read_to_string(&vdf_path) {
             for root in parse_library_roots(&text) {

@@ -19,7 +19,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { open } from '@tauri-apps/plugin-dialog'
-import { FolderOpen } from 'lucide-vue-next'
+import { FolderOpen } from '@lucide/vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 
 withDefaults(defineProps<{

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tauri::command;
 
@@ -25,6 +25,8 @@ const RADMIN_CANDIDATE_PATHS: &[&str] = &[
     r"D:\Program Files (x86)\Radmin VPN\RadminVPN.exe",
 ];
 
+const RADMIN_EXECUTABLE_NAMES: &[&str] = &["RvRvpnGui.exe", "Radmin.exe", "RadminVPN.exe"];
+
 /// 探测 Radmin VPN 可执行文件，返回首个存在的完整路径。
 fn find_radmin_exe() -> Option<String> {
     for path in RADMIN_CANDIDATE_PATHS {
@@ -35,13 +37,55 @@ fn find_radmin_exe() -> Option<String> {
     None
 }
 
+fn is_supported_radmin_executable(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| {
+            RADMIN_EXECUTABLE_NAMES
+                .iter()
+                .any(|candidate| name.eq_ignore_ascii_case(candidate))
+        })
+        .unwrap_or(false)
+}
+
+fn resolve_radmin_selection(selection: &str) -> Result<String, String> {
+    let selected = PathBuf::from(selection.trim());
+    let executable = if selected.is_file() && is_supported_radmin_executable(&selected) {
+        selected
+    } else if selected.is_dir() {
+        RADMIN_EXECUTABLE_NAMES
+            .iter()
+            .map(|name| selected.join(name))
+            .find(|path| path.is_file())
+            .ok_or_else(|| "所选目录中没有 Radmin VPN 可执行文件".to_string())?
+    } else {
+        return Err("请选择 Radmin VPN 的 exe 文件或安装目录".to_string());
+    };
+
+    executable
+        .canonicalize()
+        .map(|path| path.to_string_lossy().into_owned())
+        .map_err(|error| format!("读取 Radmin VPN 路径失败: {error}"))
+}
+
+#[command]
+pub async fn validate_radmin_path(path: String) -> Result<String, String> {
+    resolve_radmin_selection(&path)
+}
+
+#[command]
+pub async fn detect_palworld_game() -> Result<String, String> {
+    find_palworld_exe().ok_or_else(|| "未在 Steam 库中找到 Palworld 游戏本体".to_string())
+}
+
 /// F2 · 启动 Radmin VPN（仅拉起应用，不接管"加入网络"）。
 #[command]
-pub async fn launch_radmin_vpn() -> Result<String, String> {
-    let exe = find_radmin_exe().ok_or_else(|| {
-        "未找到 Radmin VPN，请确认已安装（默认路径为 C:\\Program Files (x86)\\Radmin VPN\\Radmin.exe）"
-            .to_string()
-    })?;
+pub async fn launch_radmin_vpn(preferred_path: Option<String>) -> Result<String, String> {
+    let exe = match preferred_path.filter(|path| !path.trim().is_empty()) {
+        Some(path) => resolve_radmin_selection(&path)?,
+        None => find_radmin_exe()
+            .ok_or_else(|| "未找到 Radmin VPN，请确认已安装或在概览中手动选择其 exe".to_string())?,
+    };
     Command::new(&exe)
         .spawn()
         .map_err(|e| format!("启动 Radmin VPN 失败: {}", e))?;
@@ -74,7 +118,9 @@ fn is_steam_running() -> bool {
         .output()
         .map(|o| {
             let stdout = String::from_utf8_lossy(&o.stdout);
-            stdout.lines().any(|line| line.to_lowercase().contains("steam.exe"))
+            stdout
+                .lines()
+                .any(|line| line.to_lowercase().contains("steam.exe"))
         })
         .unwrap_or(false)
 }
@@ -130,15 +176,26 @@ mod tests {
 
     #[test]
     fn radmin_candidates_cover_the_standard_radmin_executable() {
-        assert!(
-            RADMIN_CANDIDATE_PATHS
-                .iter()
-                .any(|path| path.ends_with(r"Radmin VPN\Radmin.exe"))
-        );
+        assert!(RADMIN_CANDIDATE_PATHS
+            .iter()
+            .any(|path| path.ends_with(r"Radmin VPN\Radmin.exe")));
     }
 
     #[test]
     fn radmin_candidates_prefer_the_vpn_gui() {
         assert!(RADMIN_CANDIDATE_PATHS[0].ends_with(r"Radmin VPN\RvRvpnGui.exe"));
+    }
+
+    #[test]
+    fn manual_application_paths_are_validated_by_backend_commands() {
+        let source = include_str!("launcher.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("launcher production source must precede tests");
+
+        assert!(production.contains("pub async fn validate_radmin_path"));
+        assert!(production.contains("pub async fn detect_palworld_game"));
+        assert!(production.contains("resolve_radmin_selection"));
     }
 }

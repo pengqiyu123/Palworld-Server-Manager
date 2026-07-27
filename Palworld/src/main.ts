@@ -38,11 +38,11 @@ app.mount('#app')
 
 /**
  * VITE_MOCK 开关：
- * - 'true'（默认）：注入样例数据，不调用任何真实 Tauri 命令。
- * - 'false'：走 src/api/tauri.ts 的真实 invoke（成品模式）。
+ * - 仅显式 'true'：注入样例数据，不调用真实 Tauri 命令。
+ * - 缺省或 'false'：走 src/api/tauri.ts 的真实 invoke（成品模式）。
  */
 const env = (import.meta as unknown as { env?: Record<string, string | undefined> }).env
-const MOCK = (env?.VITE_MOCK ?? 'true') !== 'false'
+const MOCK = env?.VITE_MOCK === 'true'
 
 /**
  * 全局初始化各 store。
@@ -93,11 +93,13 @@ async function bootstrapStores(): Promise<void> {
     console.warn('订阅事件失败:', e)
   }
 
-  // 4. 加载配置项描述
+  // 4. 加载真实配置；概览和侧栏会立即使用服名、最大人数等当前值。
   try {
-    await configStore.loadDescriptions()
+    const configPath = settingsStore.settings.config_path ||
+      settingsStore.computeConfigPath(settingsStore.settings.server_path)
+    if (configPath) await configStore.load(configPath)
   } catch (e) {
-    console.warn('加载配置描述失败:', e)
+    console.warn('加载服务器配置失败:', e)
   }
 
   // 5. 网络初始检测（firewall + radmin 并行）
@@ -107,10 +109,8 @@ async function bootstrapStores(): Promise<void> {
     console.warn('网络检测失败:', e)
   }
 
-  // 6. 运行中的服务器需要 REST 数据；概览页不再切换到另一套模式。
-  if (serverStore.status.running) {
-    serverStore.startPolling()
-  }
+  // 6. 离线时也持续核对状态，才能发现外部启动或黑色窗口被关闭。
+  serverStore.startLiveMonitoring()
 }
 
 void bootstrapStores()

@@ -49,8 +49,6 @@ pub async fn add_firewall_rules() -> Result<String, String> {
     let rules = [
         (8211, "UDP", "Palworld Server Game"),
         (27015, "UDP", "Palworld Server Query"),
-        (25575, "TCP", "Palworld Server RCON"),
-        (8212, "TCP", "Palworld Server REST"),
     ];
 
     for (port, protocol, name) in rules {

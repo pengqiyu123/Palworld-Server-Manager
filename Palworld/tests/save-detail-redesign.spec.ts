@@ -31,8 +31,18 @@ describe('本地存档详情弹窗（Q 用户反馈修复）', () => {
     expect(saveView).not.toContain('wd-grid')
   })
 
+  it('世界详情复用修改器富解析结果展示玩家、公会和科技点', () => {
+    expect(saveView).toContain(':modifier-state="detailModifierState"')
+    expect(saveView).toContain('api.modifier.getWorld(world.path)')
+    expect(modal).toContain('modifierState.players')
+    expect(modal).toContain('modifierState.guilds')
+    expect(modal).toContain('普通科技点')
+    expect(modal).toContain('古代科技点')
+    expect(modal).toContain('公会')
+  })
+
   it('点击调用按路径解析的世界摘要（修复本地玩家列表为空）', () => {
-    expect(saveView).toContain('worldSummaryByPath(w.path)')
+    expect(saveView).toContain('worldSummaryByPath(world.path)')
     expect(saveView).not.toContain('worldSummary(w.name)')
   })
 

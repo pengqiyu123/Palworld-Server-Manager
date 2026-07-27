@@ -31,12 +31,41 @@
       <span>首次配置：填写完成并保存后会返回概览页启动服务器。</span>
     </div>
 
+    <div class="cfg-world-option-hint">
+      <AppIcon name="info" :size="16" />
+      <span>已有世界的 WorldOption.sav 可能覆盖部分世界规则。保存配置后请重启服务器，并以游戏内实际效果为准。</span>
+    </div>
+
+    <div class="cfg-presets">
+      <div class="cfg-presets-head">
+        <div>
+          <div class="cfg-presets-title">快速设置玩法</div>
+          <div class="cfg-presets-sub">选择一种游玩节奏，预览后再应用到当前编辑。</div>
+        </div>
+        <select v-model="selectedPreset" class="cfg-presets-select" aria-label="玩法预设">
+          <option value="" disabled>选择预设</option>
+          <option v-for="preset in presets" :key="preset.name" :value="preset.name">
+            {{ presetLabel(preset.name) }}
+          </option>
+        </select>
+      </div>
+      <template v-if="selectedPresetMeta">
+        <p class="cfg-presets-description">{{ selectedPresetMeta.description }}</p>
+        <div class="cfg-presets-preview" aria-label="预设将修改的关键设置">
+          <span v-for="[key, value] in presetPreview" :key="key">{{ formatPresetParam(key, value) }}</span>
+        </div>
+      </template>
+      <button class="btn btn-primary btn-sm" :disabled="!selectedPreset || saving" @click="onApplyPreset">
+        应用预设
+      </button>
+    </div>
+
     <!-- AdminPassword 专属区 -->
     <div class="admin-pw-section">
       <div class="apw-head">
         <span class="apw-title">管理员密码 (AdminPassword)</span>
         <span class="apw-tag">REST/RCON 认证用</span>
-        <InfoTip :html="adminPasswordTip" />
+        <InfoTip :text="adminPasswordTip" />
       </div>
       <div class="apw-body">
         <div class="apw-input-row">
@@ -104,7 +133,7 @@
         :max="it.max"
         :step="it.step"
         :options="it.options"
-        :tip-html="it.tip"
+        :tip-text="it.tip"
         :default-text="it.defaultText"
         @update:model-value="(v) => onUpdate(it.key, v, it.editable)"
       />
@@ -129,6 +158,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { useServerStore } from '@/stores/server'
 import { useToast } from '@/components/ui/useToast'
 import { api } from '@/api/tauri'
+import type { PresetMeta } from '@/types/tauri'
 import AppIcon from '@/components/ui/AppIcon.vue'
 import CfgGroup from '@/components/ui/CfgGroup.vue'
 import CfgItem from '@/components/ui/CfgItem.vue'
@@ -172,6 +202,46 @@ const showPw = ref(false)
 const editingPw = ref(false)
 const pwBuffer = ref('')
 const pwInputRef = ref<HTMLInputElement | null>(null)
+const presets = ref<PresetMeta[]>([])
+const selectedPreset = ref('')
+
+const presetLabels: Record<string, string> = {
+  casual: '休闲：护肝爽玩，适合首次入坑',
+  normal: '正常：原汁原味，略微加快进度',
+  challenge: '挑战：资源紧张，适合通关后重玩',
+}
+
+const selectedPresetMeta = computed(() => presets.value.find((preset) => preset.name === selectedPreset.value))
+const presetPreview = computed(() => selectedPresetMeta.value?.key_params ?? [])
+
+function presetLabel(name: string): string {
+  return presetLabels[name] ?? name
+}
+
+function formatPresetParam(key: string, value: string): string {
+  const labels: Record<string, string> = {
+    Difficulty: '难度规则',
+    ExpRate: '经验',
+    PalCaptureRate: '捕获率',
+    PlayerDamageRateAttack: '玩家伤害',
+    PlayerDamageRateDefense: '受到伤害',
+    CollectionDropRate: '采集掉落',
+    EnemyDropItemRate: '敌人掉落',
+    DeathPenalty: '死亡惩罚',
+  }
+  const displayValue = key.endsWith('Rate') && value !== 'None' ? `${Number(value)}x` : value
+  return `${labels[key] ?? key}：${displayValue}`
+}
+
+async function onApplyPreset(): Promise<void> {
+  if (!selectedPreset.value) return
+  try {
+    await configStore.applyPreset(selectedPreset.value)
+    toast.info('预设已应用到当前编辑，点击「保存配置」后生效')
+  } catch (e) {
+    toast.error(`应用预设失败: ${e instanceof Error ? e.message : String(e)}`)
+  }
+}
 
 // 确认弹窗
 const confirmVisible = ref(false)
@@ -189,7 +259,7 @@ const adminPasswordDisplay = computed(() => {
   return raw
 })
 
-function onCopyPw(): void {
+async function onCopyPw(): Promise<void> {
   const raw = adminPasswordDisplay.value.trim()
   if (!raw) {
     toast.warning('管理员密码为空')
@@ -199,7 +269,7 @@ function onCopyPw(): void {
   const pw = raw.replace(/^"|"$/g, '')
   const cmd = `/AdminPassword ${pw}`
   try {
-    navigator.clipboard.writeText(cmd)
+    await navigator.clipboard.writeText(cmd)
     toast.success('管理员指令已复制，粘贴到游戏聊天框回车即可获管理员权限')
   } catch {
     const textarea = document.createElement('textarea')
@@ -207,7 +277,7 @@ function onCopyPw(): void {
     document.body.appendChild(textarea)
     textarea.select()
     try {
-      document.execCommand('copy')
+      if (!document.execCommand('copy')) throw new Error('copy rejected')
       toast.success('管理员指令已复制，粘贴到游戏聊天框回车即可获管理员权限')
     } catch {
       toast.error('复制失败')
@@ -236,7 +306,7 @@ const FALLBACK_DESC: Record<string, string> = {
 
 const adminPasswordTip = computed(() => {
   const base = descriptions.value.get('AdminPassword') || FALLBACK_DESC['AdminPassword']
-  return `${base}<br><br>复制按钮生成 <code>/AdminPassword &lt;密码&gt;</code> 可直接在游戏聊天框回车认证。`
+  return `${base}\n\n复制按钮生成 /AdminPassword <密码>，可直接在游戏聊天框回车认证。`
 })
 
 // 把后端 descriptions 接到每个配置项的 tip（CfgItem 已用 InfoTip 渲染 tip-html）
@@ -280,7 +350,7 @@ const groups = reactive<CfgGroupDef[]>([
       { key: 'PalCaptureRate', label: 'PalCaptureRate 捕获倍率', editable: 'number', step: 0.1, tip: '<b>用途</b>：帕鲁捕获率倍率。', defaultText: '默认 1.0', visible: true },
       { key: 'PalSpawnNumRate', label: 'PalSpawnNumRate 帕鲁出现率', editable: 'number', step: 0.1, tip: '<b>用途</b>：帕鲁出现率（过高影响性能）。', defaultText: '默认 1.0', visible: true },
       { key: 'DeathPenalty', label: 'DeathPenalty 死亡惩罚', editable: 'select', options: ['None', 'Item', 'ItemAndEquipment', 'All'], tip: '<b>用途</b>：玩家死亡时损失的物品/属性。', defaultText: '默认 Item', visible: true },
-      { key: 'bIsPvP', label: 'bIsPvP 允许 PVP', editable: 'toggle', tip: '<b>用途</b>：是否允许玩家互相攻击。', defaultText: '默认关闭', visible: true },
+      { key: 'bEnablePlayerToPlayerDamage', label: 'bEnablePlayerToPlayerDamage 允许 PVP', editable: 'toggle', tip: '<b>用途</b>：是否允许玩家互相攻击。', defaultText: '默认关闭', visible: true },
       { key: 'bHardcore', label: 'bHardcore 硬核模式', editable: 'toggle', tip: '<b>用途</b>：死亡不可复活。', defaultText: '默认关闭', visible: true },
       { key: 'bEnableInvaderEnemy', label: 'bEnableInvaderEnemy 入侵敌人', editable: 'toggle', tip: '<b>用途</b>：启用袭击事件。', defaultText: '默认开启', visible: true },
       { key: 'PalEggDefaultHatchingTime', label: 'PalEggDefaultHatchingTime 孵化时间', editable: 'number', step: 0.1, tip: '<b>用途</b>：帕鲁蛋孵化时间（小时，0=即时）。', defaultText: '默认 1.0', visible: true },
@@ -413,6 +483,11 @@ onMounted(async () => {
   } catch (e) {
     toast.error(`加载配置描述失败: ${e instanceof Error ? e.message : String(e)}`)
   }
+  try {
+    presets.value = await api.config.listPresets()
+  } catch (e) {
+    toast.error(`加载玩法预设失败: ${e instanceof Error ? e.message : String(e)}`)
+  }
   const configPath = settingsStore.settings.config_path ||
     settingsStore.computeConfigPath(settingsStore.settings.server_path)
   if (configPath) {
@@ -437,6 +512,76 @@ onMounted(async () => {
   margin-bottom: 16px;
   font-size: 13px;
   color: var(--palwarm-text-primary, #3f322c);
+}
+.cfg-world-option-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 16px;
+  padding: 10px 14px;
+  border: 1px solid rgba(184, 120, 47, 0.26);
+  border-radius: 8px;
+  background: var(--amber-bg, rgba(184, 120, 47, 0.1));
+  color: var(--text-mid2, #a39383);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.cfg-world-option-hint :deep(svg) { flex: 0 0 auto; color: var(--amber, #9b5c14); }
+.cfg-presets {
+  margin-bottom: 16px;
+  padding: 16px 20px;
+  border: 1px solid var(--palwarm-border, #e8ddd0);
+  border-radius: 8px;
+  background: var(--palwarm-surface, #faf6f0);
+}
+.cfg-presets-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.cfg-presets-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--palwarm-text-primary, #3f322c);
+}
+.cfg-presets-sub,
+.cfg-presets-description {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-mid2, #a39383);
+}
+.cfg-presets-select {
+  min-width: 230px;
+  padding: 8px 10px;
+  border: 1px solid var(--palwarm-border, #e8ddd0);
+  border-radius: 6px;
+  background: var(--palwarm-bg, #fff);
+  color: var(--palwarm-text-primary, #3f322c);
+}
+.cfg-presets-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 12px 0;
+}
+.cfg-presets-preview span {
+  padding: 3px 7px;
+  border-radius: 4px;
+  background: rgba(55, 118, 93, 0.1);
+  color: #2f6a52;
+  font-size: 12px;
+}
+@media (max-width: 700px) {
+  .cfg-presets-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .cfg-presets-select {
+    min-width: 0;
+    width: 100%;
+  }
 }
 .admin-pw-section {
   margin-bottom: 16px;

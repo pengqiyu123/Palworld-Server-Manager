@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::io::{Cursor, Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use gvas::cursor_ext::ReadExt;
 use gvas::game_version::{DeserializedGameVersion, PalworldCompressionType};
@@ -111,7 +111,7 @@ fn skip_property_body<R: Read + Seek>(cursor: &mut R, sub_type: &str) -> Result<
 ///
 /// 返回构造好的 `GvasFile`（仅含 `worldSaveData` 一个顶层属性）。任何一层解析失败都返回
 /// `None`（防御式：调用方据此回退为空列表，绝不整体 panic）。
-fn parse_level_gvas(level_path: &Path) -> Option<GvasFile> {
+pub(crate) fn parse_level_gvas(level_path: &Path) -> Option<GvasFile> {
     let sav = SavFile::load(level_path).ok()?;
     let mut cursor = Cursor::new(sav.raw.clone());
 
@@ -225,7 +225,7 @@ fn parse_level_gvas(level_path: &Path) -> Option<GvasFile> {
                             wsd_fields.insert(sub_name.clone(), vec![sub_prop]);
                             collected.insert(sub_name.clone());
                         }
-                        Err(e) => {
+                        Err(_e) => {
                             // 目标字段解析失败（防御式）：回退到字段头起点，读头后 seek 越过，
                             // 避免游标错位传染后续字段。
                             let _ = cursor.seek(SeekFrom::Start(header_pos));
@@ -277,7 +277,7 @@ fn parse_level_gvas(level_path: &Path) -> Option<GvasFile> {
 }
 
 /// 取 `MapProperty::Properties` 的键值表（公会/角色 Map 通常是 Properties 变体）。
-fn as_props_map(p: &Property) -> Option<&HashableIndexMap<Property, Property>> {
+pub(crate) fn as_props_map(p: &Property) -> Option<&HashableIndexMap<Property, Property>> {
     match p {
         Property::MapProperty(MapProperty::Properties { value, .. }) => Some(value),
         _ => None,
@@ -290,7 +290,7 @@ fn as_props_map(p: &Property) -> Option<&HashableIndexMap<Property, Property>> {
 /// `Property::StructPropertyValue` 裸变体（而非 `Property::StructProperty`）；
 /// 而顶层属性 / 嵌套字段（`include_header=true`）则是 `Property::StructProperty`。
 /// 两个包装都要兼容，否则对 Map 条目取字段会整体失败。
-fn as_struct_value(p: &Property) -> Option<&StructPropertyValue> {
+pub(crate) fn as_struct_value(p: &Property) -> Option<&StructPropertyValue> {
     match p {
         Property::StructProperty(s) => Some(&s.value),
         Property::StructPropertyValue(spv) => Some(spv),
@@ -304,6 +304,7 @@ fn as_struct_value(p: &Property) -> Option<&StructPropertyValue> {
 /// - 纯 `Guid`（`StructPropertyValue::Guid`，GSM 键经 hint="Guid" 解析所得）；
 /// - 自描述 `CustomStruct` 键（CSPM 键经 hint 解析所得）：
 ///   优先取名为 `GroupId` / `InstanceId` / `PlayerUId` 的 Guid 字段，否则取第一个 Guid 字段。
+#[cfg(test)]
 fn extract_key_guid(k: &Property) -> String {
     match as_struct_value(k) {
         Some(StructPropertyValue::Guid(g)) => g.to_string(),
@@ -333,7 +334,7 @@ fn extract_key_guid(k: &Property) -> String {
 /// 从公会值结构取 RawData 二进制块（ArrayProperty::Bytes）。
 ///
 /// 兼容 `Property::StructProperty` 与 `Property::StructPropertyValue` 两种包装。
-fn extract_rawdata_bytes(v: &Property) -> Option<Vec<u8>> {
+pub(crate) fn extract_rawdata_bytes(v: &Property) -> Option<Vec<u8>> {
     if let Some(StructPropertyValue::CustomStruct(map)) = as_struct_value(v) {
         if let Some(raw) = map.get("RawData") {
             if let Some(first) = raw.first() {
@@ -346,19 +347,16 @@ fn extract_rawdata_bytes(v: &Property) -> Option<Vec<u8>> {
     None
 }
 
-/// 标准 GUID registry 格式（前三组小端）：用于与磁盘文件名对齐。
+/// 将存档内 FGuid 原始字节还原为 Palworld 的 32 位 UID 文本。
 ///
-/// gvas 的 `Guid::to_string()` / `to_u8()` 采用不同字节序（如 `4E239D4F` 经 gvas
-/// 输出为 `4F9D234E`），无法与磁盘玩家文件 `Players/<UID>.sav` 的 stem 直接对应。
-/// 本函数按 Windows 注册表 GUID 约定（前 3 组小端、后 2 组大端）重新格式化，
-/// 使 `player_uid` / `guid` 与磁盘文件名一致。
-fn guid_std(raw: &[u8; 16]) -> String {
-    let g1 = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
-    let g2 = u16::from_le_bytes([raw[4], raw[5]]);
-    let g3 = u16::from_le_bytes([raw[6], raw[7]]);
-    let g4 = u16::from_be_bytes([raw[8], raw[9]]);
-    let g5 = u64::from_be_bytes([raw[10], raw[11], raw[12], raw[13], raw[14], raw[15], 0, 0]);
-    format!("{:08X}{:04X}{:04X}{:04X}{:012X}", g1, g2, g3, g4, g5)
+/// Palworld UID 由四个 `u32` 组成，磁盘内每个词为小端。不能按 Windows UUID
+/// 的 8-4-4-4-12 分组处理，否则最后两个词会错位，导致玩家文件找不到。
+pub(crate) fn guid_std(raw: &[u8; 16]) -> String {
+    let w1 = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
+    let w2 = u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]);
+    let w3 = u32::from_le_bytes([raw[8], raw[9], raw[10], raw[11]]);
+    let w4 = u32::from_le_bytes([raw[12], raw[13], raw[14], raw[15]]);
+    format!("{w1:08X}{w2:08X}{w3:08X}{w4:08X}")
 }
 
 /// 从 CSPM Map 键（`FPalInstanceId` 自定义结构体）取出 `(PlayerUId, InstanceId)`
@@ -391,7 +389,7 @@ fn key_player_instance(k: &Property) -> Option<([u8; 16], [u8; 16])> {
 /// RawData 是纯属性流，必须用 `Property::new(include_header=true)` + 父 GVAS 的
 /// `custom_versions` 重新解析（不能走 `GvasFile::read_with_hints`，后者要求 GVAS 头）。
 /// 任一层字段解析失败仅跳过并继续（防御式），绝不整体报错。
-fn parse_rawdata_stream(
+pub(crate) fn parse_rawdata_stream(
     bytes: &[u8],
     custom_versions: &HashableIndexMap<Guid, u32>,
 ) -> HashableIndexMap<String, Vec<Property>> {
@@ -457,6 +455,7 @@ fn read_int_value(p: Option<&Property>) -> u32 {
 
 /// 从公会 RawData 二进制块中尽力解码公会名（group_id 之后紧跟 FString）。
 /// 任何解析异常都返回空串，绝不影响整体摘要。
+#[cfg(test)]
 fn decode_guild_name(bytes: &[u8]) -> String {
     let mut cur = 16usize; // 跳过 group_id (16 字节)
     if bytes.len() < cur + 4 {
@@ -485,35 +484,22 @@ fn decode_guild_name(bytes: &[u8]) -> String {
 }
 
 /// 从 Level.sav 解析公会列表（防御式，失败返回空）。
-fn read_guilds(level_path: &Path) -> Vec<GuildEntry> {
-    let gvas = match parse_level_gvas(level_path) {
-        Some(g) => g,
-        None => return Vec::new(),
-    };
-
-    let mut guilds: Vec<GuildEntry> = Vec::new();
-    if let Some(wsd) = sav_io::top_field(&gvas, "worldSaveData") {
-        if let Some(csv) = sav_io::struct_value(wsd) {
-            if let Some(fields) = sav_io::custom_fields(csv) {
-                if let Some(gm) = sav_io::field(fields, "GroupSaveDataMap") {
-                    if let Some(props_map) = as_props_map(gm) {
-                        for (k, v) in props_map.iter() {
-                            let guild_id = extract_key_guid(k);
-                            let name = extract_rawdata_bytes(v)
-                                .map(|b| decode_guild_name(&b))
-                                .unwrap_or_default();
-                            guilds.push(GuildEntry {
-                                guild_id,
-                                name,
-                                ..Default::default()
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
-    guilds
+pub(crate) fn read_guilds(level_path: &Path) -> Vec<GuildEntry> {
+    crate::save_edit::modifier::read_modifier_guilds(level_path)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|guild| GuildEntry {
+            guild_id: guild.guild_id,
+            name: guild.name,
+            admin_player_uid: guild.admin_player_uid,
+            players: guild
+                .members
+                .iter()
+                .map(|member| member.player_uid.clone())
+                .collect(),
+            handle_ids: Vec::new(),
+        })
+        .collect()
 }
 
 /// 生成世界摘要（玩家 + 公会）。按世界名解析（仅服务器 SaveGames 根下的世界）。
@@ -555,6 +541,13 @@ fn read_world_summary_from(data_dir: &Path) -> WorldSummary {
         Vec::new()
     };
 
+    for player in &mut players {
+        player.guild_id = guilds
+            .iter()
+            .find(|guild| guild.players.iter().any(|uid| uid == &player.player_uid))
+            .map(|guild| guild.guild_id.clone());
+    }
+
     WorldSummary {
         world_name: String::new(),
         players,
@@ -573,7 +566,7 @@ fn read_world_summary_from(data_dir: &Path) -> WorldSummary {
 /// `guild_id` / `is_host` / `last_online` / `pal_count` 为 best-effort 留空 / 0：
 /// 公会 `GroupSaveDataMap` 的 `RawData.players[]` 在 Rust/gvas 下不可结构化解析，
 /// 故暂不取。任一层解析失败仅使该玩家被跳过，绝不整体报错 / panic。
-fn read_players_from_level(level_path: &Path) -> Vec<PlayerEntry> {
+pub(crate) fn read_players_from_level(level_path: &Path) -> Vec<PlayerEntry> {
     let gvas = match parse_level_gvas(level_path) {
         Some(g) => g,
         None => return Vec::new(),
@@ -674,11 +667,191 @@ pub fn migrate_world_impl(req: &MigrateRequest) -> Result<usize, String> {
     migrate_world_with_root(req, &save_root)
 }
 
+/// Build and validate a candidate world beside the live directory, then swap it into place.
+/// The caller must create the durable full backup before invoking this primitive.
+pub(crate) fn replace_world_transactional(source: &Path, target: &Path) -> Result<usize, String> {
+    if !source.is_dir() || !source.join("Level.sav").is_file() {
+        return Err(format!("源世界缺少 Level.sav: {}", source.display()));
+    }
+    if !target.is_dir() {
+        return Err(format!("目标世界目录不存在: {}", target.display()));
+    }
+    if source == target {
+        return Err("源世界与目标世界相同，无需迁移".to_string());
+    }
+
+    let parent = target
+        .parent()
+        .ok_or_else(|| "目标世界缺少父目录".to_string())?;
+    let name = target
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "目标世界目录名无效".to_string())?;
+    let staging = parent.join(format!(".{name}.migration-tmp"));
+    let previous = parent.join(format!(".{name}.migration-old"));
+
+    recover_interrupted_world_swap(target, &staging, &previous)?;
+    let mut copied = 0usize;
+    let prepare_result = (|| {
+        path_util::copy_dir_recursive(source, &staging, &mut copied)?;
+        let staged_option = staging.join("WorldOption.sav");
+        if staged_option.is_file() {
+            std::fs::remove_file(&staged_option)
+                .map_err(|error| format!("停用迁移世界配置失败: {error}"))?;
+        }
+        validate_staged_world(source, &staging)?;
+        sync_tree(&staging)?;
+        Ok::<(), String>(())
+    })();
+    if let Err(error) = prepare_result {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+
+    std::fs::rename(target, &previous)
+        .map_err(|error| format!("暂存当前服务器世界失败: {error}"))?;
+    if let Err(error) = std::fs::rename(&staging, target) {
+        let restore_error = std::fs::rename(&previous, target).err();
+        let _ = std::fs::remove_dir_all(&staging);
+        return match restore_error {
+            Some(restore) => Err(format!(
+                "提交迁移世界失败: {error}; 自动恢复失败: {restore}"
+            )),
+            None => Err(format!("提交迁移世界失败，已恢复原世界: {error}")),
+        };
+    }
+
+    if let Err(error) = std::fs::remove_dir_all(&previous) {
+        return Err(format!(
+            "世界已迁移，但清理旧暂存目录失败，请勿启动服务器: {error}"
+        ));
+    }
+    Ok(copied)
+}
+
+fn recover_interrupted_world_swap(
+    target: &Path,
+    staging: &Path,
+    previous: &Path,
+) -> Result<(), String> {
+    if previous.exists() {
+        if target.exists() {
+            return Err(format!(
+                "检测到未完成的迁移，请先处理恢复目录: {}",
+                previous.display()
+            ));
+        }
+        std::fs::rename(previous, target).map_err(|error| format!("恢复中断迁移失败: {error}"))?;
+    }
+    if staging.exists() {
+        std::fs::remove_dir_all(staging)
+            .map_err(|error| format!("清理未完成迁移暂存目录失败: {error}"))?;
+    }
+    Ok(())
+}
+
+fn validate_staged_world(source: &Path, staging: &Path) -> Result<(), String> {
+    let level = staging.join("Level.sav");
+    if !level.is_file() || level.metadata().map(|meta| meta.len()).unwrap_or(0) == 0 {
+        return Err("暂存世界的 Level.sav 缺失或为空".to_string());
+    }
+    validate_copied_files(source, source, staging)
+}
+
+fn validate_copied_files(root: &Path, current: &Path, staging: &Path) -> Result<(), String> {
+    let entries = std::fs::read_dir(current).map_err(|error| format!("校验源世界失败: {error}"))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("校验源世界目录项失败: {error}"))?;
+        let source_path = entry.path();
+        let relative = source_path
+            .strip_prefix(root)
+            .map_err(|_| "校验迁移相对路径失败".to_string())?;
+        let staged_path = staging.join(relative);
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("校验源文件类型失败: {error}"))?;
+        if file_type.is_symlink() {
+            return Err(format!("迁移不支持符号链接: {}", source_path.display()));
+        }
+        if file_type.is_dir() {
+            if !staged_path.is_dir() {
+                return Err(format!("暂存目录缺失: {}", relative.display()));
+            }
+            validate_copied_files(root, &source_path, staging)?;
+        } else if file_type.is_file() {
+            if relative == Path::new("WorldOption.sav") {
+                continue;
+            }
+            if !staged_path.is_file() {
+                return Err(format!("暂存文件缺失: {}", relative.display()));
+            }
+            if !files_equal(&source_path, &staged_path)? {
+                return Err(format!("暂存文件校验不一致: {}", relative.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn files_equal(left: &Path, right: &Path) -> Result<bool, String> {
+    const BUFFER_SIZE: usize = 64 * 1024;
+    let mut left = std::io::BufReader::new(
+        std::fs::File::open(left).map_err(|error| format!("打开源文件校验失败: {error}"))?,
+    );
+    let mut right = std::io::BufReader::new(
+        std::fs::File::open(right).map_err(|error| format!("打开暂存文件校验失败: {error}"))?,
+    );
+    let mut left_buffer = [0_u8; BUFFER_SIZE];
+    let mut right_buffer = [0_u8; BUFFER_SIZE];
+    loop {
+        let left_read = left
+            .read(&mut left_buffer)
+            .map_err(|error| format!("读取源文件校验失败: {error}"))?;
+        let right_read = right
+            .read(&mut right_buffer)
+            .map_err(|error| format!("读取暂存文件校验失败: {error}"))?;
+        if left_read != right_read || left_buffer[..left_read] != right_buffer[..right_read] {
+            return Ok(false);
+        }
+        if left_read == 0 {
+            return Ok(true);
+        }
+    }
+}
+
+fn sync_tree(root: &Path) -> Result<(), String> {
+    let mut directories = vec![PathBuf::from(root)];
+    while let Some(directory) = directories.pop() {
+        for entry in
+            std::fs::read_dir(&directory).map_err(|error| format!("同步暂存目录失败: {error}"))?
+        {
+            let entry = entry.map_err(|error| format!("同步暂存目录项失败: {error}"))?;
+            let file_type = entry
+                .file_type()
+                .map_err(|error| format!("同步暂存文件类型失败: {error}"))?;
+            if file_type.is_dir() {
+                directories.push(entry.path());
+            } else if file_type.is_file() {
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(entry.path())
+                    .and_then(|file| file.sync_all())
+                    .map_err(|error| format!("同步暂存文件失败: {error}"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 在指定的 SaveGames 根目录内迁移世界数据层。
 ///
 /// 将路径解析与文件复制分开，使测试能使用隔离的临时存档根，同时保证生产路径
 /// 与测试路径共享完全相同的迁移逻辑。
-fn migrate_world_with_root(req: &MigrateRequest, save_root: &Path) -> Result<usize, String> {
+pub(crate) fn migrate_world_with_root(
+    req: &MigrateRequest,
+    save_root: &Path,
+) -> Result<usize, String> {
     // 源解析：local = 本地绝对路径（穿透定位数据层）；server = 服务器世界名。
     let src = if req.source_type == "local" {
         path_util::find_world_data_dir(Path::new(&req.source_world))
@@ -694,33 +867,7 @@ fn migrate_world_with_root(req: &MigrateRequest, save_root: &Path) -> Result<usi
         return Err("源世界与目标世界相同，无需迁移".to_string());
     }
 
-    // 目标已存在：迁移前由调用方负责备份；此处仅做覆盖前清理。
-    if tgt.exists() {
-        path_util::remove_dir_recursive(&tgt)?;
-    } else {
-        std::fs::create_dir_all(&tgt)
-            .map_err(|e| format!("创建目标目录 {} 失败: {}", tgt.display(), e))?;
-    }
-
-    let mut copied = 0usize;
-    path_util::copy_dir_recursive(&src, &tgt, &mut copied)?;
-
-    if req.delete_world_option {
-        // R5：删除目标世界的 WorldOption.sav（避免旧设置污染）
-        let candidates: [Option<std::path::PathBuf>; 2] = [
-            Some(tgt.join("WorldOption.sav")),
-            tgt.join("Level.sav")
-                .parent()
-                .map(|p| p.join("WorldOption.sav")),
-        ];
-        for cand in candidates.into_iter().flatten() {
-            if cand.is_file() {
-                let _ = std::fs::remove_file(&cand);
-            }
-        }
-    }
-
-    Ok(copied)
+    replace_world_transactional(&src, &tgt)
 }
 
 // ===========================================================================
@@ -735,7 +882,7 @@ mod tests {
     use gvas::properties::struct_property::{StructProperty, StructPropertyValue};
     use gvas::properties::Property;
     use gvas::types::Guid;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn decode_guild_name_ascii() {
@@ -750,6 +897,59 @@ mod tests {
     fn decode_guild_name_short_returns_empty() {
         let b = vec![0u8; 10]; // 不足 16+4 头，应安全返回空串
         assert_eq!(decode_guild_name(&b), "");
+    }
+
+    /// 只读探针：直接调用项目内部算法 `f5_world_summary_by_path_impl`
+    /// （底层 `read_players_from_level` 枚举 Level.sav 的 CharacterSaveParameterMap）
+    /// 解析源（本地单机）与目标（服务器）两边世界的角色与公会，纯打印不写文件。
+    #[test]
+    fn parse_both_worlds_characters_readonly() {
+        let source = "C:/Users/pengq/AppData/Local/Pal/Saved/SaveGames/76561199381352956/1D5D1F304D3AA1FE2818BA98D5223DFE";
+        let target = "E:/SteamLibrary/steamapps/common/PalServer/Pal/Saved/SaveGames/0/1A91A61548C7B6FD7B58B2B70710F7EE";
+
+        for (label, path) in [("源(本地单机)", source), ("目标(服务器)", target)] {
+            println!("===== {label} : {path} =====");
+            match f5_world_summary_by_path_impl(path) {
+                Ok(sum) => {
+                    println!("-- 角色({} 个) --", sum.players.len());
+                    for p in &sum.players {
+                        println!(
+                            "  nickname={} | player_uid={} | instance_id={} | guid={} | level={}",
+                            p.nickname, p.player_uid, p.instance_id, p.guid, p.level
+                        );
+                    }
+                    println!("-- 公会({} 个) --", sum.guilds.len());
+                    for g in &sum.guilds {
+                        println!("  name={} | guild_id={}", g.name, g.guild_id);
+                    }
+                }
+                Err(e) => println!("  解析失败: {e}"),
+            }
+        }
+    }
+
+    #[test]
+    fn world_summary_only_returns_real_guild_groups() {
+        let source = Path::new("F:/1/server/SaveGames/0/1A91A61548C7B6FD7B58B2B70710F7EE");
+        if !source.join("Level.sav").is_file() {
+            eprintln!("[skip] F:\\1 真实服务器备份不存在");
+            return;
+        }
+
+        let strict = crate::save_edit::modifier::get_modifier_world_impl(source.to_str().unwrap())
+            .expect("严格解析应成功");
+        let summary =
+            f5_world_summary_by_path_impl(source.to_str().unwrap()).expect("世界摘要应成功");
+
+        assert_eq!(summary.guilds.len(), strict.guilds.len());
+        assert!(summary
+            .guilds
+            .iter()
+            .all(|guild| { !guild.admin_player_uid.is_empty() && !guild.players.is_empty() }));
+        assert!(summary
+            .players
+            .iter()
+            .all(|player| player.guild_id.is_some()));
     }
 
     #[test]
@@ -813,6 +1013,97 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[test]
+    fn transactional_world_migration_rejects_invalid_source_without_touching_target() {
+        let root = std::env::temp_dir().join(format!(
+            "palworld_transaction_invalid_source_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let source = root.join("source");
+        let target = root.join("target");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("Level.sav"), b"live-level").unwrap();
+
+        let error = replace_world_transactional(&source, &target)
+            .expect_err("缺少 Level.sav 的源世界必须在提交前失败");
+
+        assert!(error.contains("Level.sav"));
+        assert_eq!(
+            std::fs::read(target.join("Level.sav")).unwrap(),
+            b"live-level"
+        );
+        assert!(!root.join(".target.migration-old").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn transactional_world_migration_disables_world_option_and_replaces_world() {
+        let root = std::env::temp_dir().join(format!(
+            "palworld_transaction_preserve_option_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let source = root.join("source");
+        let target = root.join("target");
+        std::fs::create_dir_all(source.join("Players")).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(source.join("Level.sav"), b"source-level").unwrap();
+        std::fs::write(source.join("Players/source.sav"), b"source-player").unwrap();
+        std::fs::write(source.join("WorldOption.sav"), b"source-option").unwrap();
+        std::fs::write(target.join("Level.sav"), b"target-level").unwrap();
+        std::fs::write(target.join("WorldOption.sav"), b"server-option").unwrap();
+
+        let copied = replace_world_transactional(&source, &target).expect("有效世界应完成事务迁移");
+
+        assert_eq!(copied, 3);
+        assert_eq!(
+            std::fs::read(target.join("Level.sav")).unwrap(),
+            b"source-level"
+        );
+        assert!(
+            !target.join("WorldOption.sav").exists(),
+            "WorldOption.sav 会覆盖专用服 INI，迁移后不得保持激活"
+        );
+        assert_eq!(
+            std::fs::read(target.join("Players/source.sav")).unwrap(),
+            b"source-player"
+        );
+        assert!(!root.join(".target.migration-old").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn transactional_world_migration_does_not_activate_source_world_option() {
+        let root = std::env::temp_dir().join(format!(
+            "palworld_transaction_source_option_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let source = root.join("source");
+        let target = root.join("target");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(source.join("Level.sav"), b"source-level").unwrap();
+        std::fs::write(source.join("WorldOption.sav"), b"single-player-option").unwrap();
+        std::fs::write(target.join("Level.sav"), b"target-level").unwrap();
+
+        replace_world_transactional(&source, &target).expect("有效世界应完成事务迁移");
+
+        assert_eq!(
+            std::fs::read(target.join("Level.sav")).unwrap(),
+            b"source-level"
+        );
+        assert!(!target.join("WorldOption.sav").exists());
+        assert_eq!(
+            std::fs::read(source.join("WorldOption.sav")).unwrap(),
+            b"single-player-option",
+            "只读来源世界必须保持不变"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     // -----------------------------------------------------------------------
     // T2 正式测试：从 Level.sav 权威源枚举玩家。
     // -----------------------------------------------------------------------
@@ -867,5 +1158,75 @@ mod tests {
         let players = read_players_from_level(&level);
         assert!(players.is_empty(), "缺 Level.sav 时应返回空 Vec");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 显式授权的实机验收：本地世界数据层迁移到专用服世界，要求逐文件哈希保真。
+    ///
+    /// 默认忽略，避免普通 `cargo test` 触碰真实存档。运行前必须由操作者在外部创建
+    /// 目标快照，并同时传入以下环境变量：
+    /// - `PALWORLD_MANUAL_LOCAL_SOURCE`：含 `Level.sav` 的本地数据层绝对路径；
+    /// - `PALWORLD_MANUAL_SAVE_ROOT`：专用服 `SaveGames` 根目录；
+    /// - `PALWORLD_MANUAL_TARGET_WORLD`：目标世界名（通常为 `0`）。
+    #[test]
+    #[ignore = "requires explicit real-save paths and a verified external backup"]
+    fn manual_acceptance_migrates_local_world_with_byte_fidelity() {
+        fn manifest(root: &Path) -> Vec<(String, u64, Vec<u8>)> {
+            fn collect(root: &Path, dir: &Path, entries: &mut Vec<(String, u64, Vec<u8>)>) {
+                for entry in std::fs::read_dir(dir)
+                    .expect("实机验收目录应可读取")
+                    .flatten()
+                {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        collect(root, &path, entries);
+                    } else {
+                        let relative = path
+                            .strip_prefix(root)
+                            .expect("文件应位于清单根目录内")
+                            .to_string_lossy()
+                            .replace('\\', "/");
+                        let bytes = std::fs::read(&path).expect("实机验收文件应可读取");
+                        entries.push((relative, bytes.len() as u64, bytes));
+                    }
+                }
+            }
+
+            let mut entries = Vec::new();
+            collect(root, root, &mut entries);
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            entries
+        }
+
+        let source = PathBuf::from(
+            std::env::var("PALWORLD_MANUAL_LOCAL_SOURCE")
+                .expect("须显式提供 PALWORLD_MANUAL_LOCAL_SOURCE"),
+        );
+        let save_root = PathBuf::from(
+            std::env::var("PALWORLD_MANUAL_SAVE_ROOT")
+                .expect("须显式提供 PALWORLD_MANUAL_SAVE_ROOT"),
+        );
+        let target_world = std::env::var("PALWORLD_MANUAL_TARGET_WORLD")
+            .expect("须显式提供 PALWORLD_MANUAL_TARGET_WORLD");
+        assert!(source.join("Level.sav").is_file(), "本地源必须是数据层目录");
+        assert!(save_root.is_dir(), "专用服 SaveGames 根目录必须存在");
+
+        let request = MigrateRequest {
+            source_world: source.to_string_lossy().to_string(),
+            target_world,
+            source_type: "local".to_string(),
+            delete_world_option: false,
+        };
+        let copied = migrate_world_with_root(&request, &save_root).expect("本地世界迁移应成功");
+        let target = path_util::world_data_dir_with_root(&request.target_world, &save_root)
+            .expect("迁移后目标数据层应存在");
+
+        assert!(copied > 0, "迁移至少应复制一个文件");
+        assert_eq!(manifest(&source), manifest(&target), "目标应逐文件保真");
+        assert!(
+            !target
+                .join(source.file_name().expect("本地源应有目录名"))
+                .exists(),
+            "目标数据层不得再嵌套本地源 GUID 目录"
+        );
     }
 }

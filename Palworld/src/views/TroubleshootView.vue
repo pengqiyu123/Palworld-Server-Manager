@@ -90,7 +90,7 @@ import {
   ChevronDown,
   Download,
   Stethoscope,
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 import { save as dialogSave } from '@tauri-apps/plugin-dialog'
 import { useServerStore } from '@/stores/server'
 import { useSettingsStore } from '@/stores/settings'

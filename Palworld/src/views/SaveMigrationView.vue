@@ -1,618 +1,837 @@
 <template>
-  <section class="screen active">
+  <section class="screen active migration-screen">
     <div class="page-head">
       <div>
-        <div class="page-title">数据迁移</div>
-        <div class="page-sub">
-          本地/联机存档 → 专用服迁移（整包世界迁移 + 修复主机存档）。F5 解析改写支线，与「本地存档」纯拷贝安全路径互不干扰。
-        </div>
+        <div class="page-title">世界与角色迁移</div>
+        <div class="page-sub">按需迁移世界、转移完整角色，或恢复单机主角色原来的公会。</div>
       </div>
       <div class="page-actions">
-        <button class="btn btn-ghost btn-sm" :disabled="loading" @click="onDiscover">刷新检测</button>
-        <button class="btn btn-ghost btn-sm" :disabled="busy" @click="onStopServer">停止服务器</button>
-      </div>
-    </div>
-
-    <!-- 未设置服务器路径引导卡（Q8：不静默扫默认目录）-->
-    <div v-if="serverPathMissing" class="sm-banner">
-      <AppIcon name="info" :size="15" />
-      <span>尚未设置服务器路径，请到【设置】填写 PalServer 根目录后再来本页操作。本页所有存档发现均基于该路径动态定位。</span>
-    </div>
-
-    <div v-if="autoDiscovered" class="sm-banner">
-      <AppIcon name="info" :size="15" />
-      <span>未在 server_path 直拼下找到存档，已自动向上扫描定位到：<code>{{ saveRoot }}</code>。请确认这正是你的帕鲁世界存档位置。</span>
-    </div>
-    <div v-else-if="saveRoot" class="sm-banner sm-banner--ok">
-      <AppIcon name="info" :size="15" />
-      <span>存档根目录：<code>{{ saveRoot }}</code></span>
-    </div>
-    <div class="sm-banner sm-banner--warn">
-      <AppIcon name="info" :size="15" />
-      <span><strong>改写类操作前会自动整目录备份（F4 机制）并在失败回滚，且需确保服务器已停止。</strong>UID/实例 ID 等底层术语对用户隐藏。</span>
-    </div>
-    <div v-if="pendingLocalSource" class="sm-banner sm-banner--info">
-      <AppIcon name="info" :size="15" />
-      <span>
-        已接收到来自本地存档的迁移请求：<strong>{{ pendingLocalName }}</strong>（{{ pendingLocalSource }}）。
-        请在上方「源世界」选择对应服务器世界后执行迁移（单机档需先整包迁移进服）。
-      </span>
-    </div>
-
-    <!-- L1/L2 世界选择 -->
-    <div class="sm-section">
-      <div class="section-title">选择世界（L1 源 / L2 目标）</div>
-      <div class="world-cols">
-        <div class="world-col">
-          <label class="char-label">源世界 / 迁移世界</label>
-          <select v-model="sourceWorld" class="input" :disabled="!worlds.length">
-            <option value="">— 请选择 —</option>
-            <option v-for="w in worlds" :key="w.name" :value="w.name">{{ w.name }}（{{ w.player_count }} 角色）</option>
-          </select>
-        </div>
-        <div class="world-col">
-          <label class="char-label">目标世界（专用服）</label>
-          <select v-model="targetWorld" class="input" :disabled="!worlds.length">
-            <option value="">— 请选择 —</option>
-            <option v-for="w in worlds" :key="w.name" :value="w.name">{{ w.name }}（{{ w.player_count }} 角色）</option>
-          </select>
-        </div>
-      </div>
-    </div>
-
-    <!-- ② 整包世界迁移（P0，先行步骤） -->
-    <div class="sm-section">
-      <div class="section-title">② 整包世界迁移（文件级整目录拷贝，P0）</div>
-      <div class="op-sub">把整个世界文件夹（Level.sav + Players/ + WorldOption.sav）原样复制到目标世界，不解析、不改动内部数据，安全且版本无关。</div>
-      <div class="op-grid">
-        <div class="op-field">
-          <label class="char-label">源世界（要搬走的世界）</label>
-          <select v-model="sourceWorld" class="input" :disabled="!worlds.length">
-            <option value="">— 请选择 —</option>
-            <option v-for="w in worlds" :key="w.name" :value="w.name">{{ w.name }}</option>
-          </select>
-        </div>
-        <div class="op-field">
-          <label class="char-label">目标世界（专用服）</label>
-          <select v-model="targetWorld" class="input" :disabled="!worlds.length">
-            <option value="">— 请选择 —</option>
-            <option v-for="w in worlds" :key="w.name" :value="w.name">{{ w.name }}</option>
-          </select>
-        </div>
-      </div>
-      <label class="chk-row">
-        <input type="checkbox" v-model="deleteWorldOption" />
-        <span>拷贝后删除目标多余/过期的 WorldOption.sav（避免覆盖 PalWorldSettings）</span>
-      </label>
-      <div class="sm-toolbar">
-        <button class="btn btn-primary btn-sm" :disabled="busy || !canMigrate" @click="onMigrate">
-          {{ busy ? '处理中…' : '执行整包迁移' }}
+        <button class="btn btn-ghost btn-sm" :disabled="loading || operationPending" @click="onDiscover">
+          {{ loading ? '正在刷新' : '刷新' }}
         </button>
-        <span class="sm-hint">迁移前自动整目录备份目标世界，失败自动回滚；需先停服。</span>
       </div>
     </div>
 
-    <!-- ① 修复主机存档（P0 灵魂步骤，角色卡选择，不再手填 GUID） -->
-    <div class="sm-section">
-      <div class="section-title">① 修复主机存档（本地主机角色 ↔ 专用服新角色，P0 灵魂步骤）</div>
-      <div class="op-sub">把本地单机的主机角色，重新映射为专用服能识别的新角色（GUID 互换）。先在专用服用原账号建好新角色并自动存档，再停服执行。</div>
-      <div class="op-field" style="max-width: 340px; margin-bottom: 12px">
-        <label class="char-label">操作世界（含旧主机角色与新角色，通常为迁移目标世界）</label>
-        <select v-model="fixWorld" class="input" :disabled="!worlds.length">
-          <option value="">— 请选择 —</option>
-          <option v-for="w in worlds" :key="w.name" :value="w.name">{{ w.name }}</option>
-        </select>
-      </div>
-      <div class="transfer-cols">
-        <div class="transfer-col">
-          <label class="char-label">旧主机角色</label>
-          <PlayerPicker :world-name="fixWorld" v-model="oldHostGuids" />
-        </div>
-        <div class="transfer-arrow" aria-hidden="true">
-          <span class="arrow-wide">➜</span>
-          <span class="arrow-narrow">↓</span>
-        </div>
-        <div class="transfer-col">
-          <label class="char-label">专用服新角色</label>
-          <PlayerPicker :world-name="fixWorld" v-model="newCharGuids" />
-        </div>
-      </div>
-      <div class="sm-toolbar">
-        <button class="btn btn-primary btn-sm" :disabled="busy || !canFixHost" @click="onFixHost">
-          {{ busy ? '处理中…' : '执行修复主机存档' }}
-        </button>
-        <span class="sm-hint">已选：旧主机 {{ oldHostGuids.length ? '1' : '0' }} 名 / 新角色 {{ newCharGuids.length ? '1' : '0' }} 名。</span>
+    <div v-if="serverPathMissing" class="notice notice--warn">
+      <AppIcon name="info" :size="16" />
+      <span>尚未设置服务器目录，请先在设置中完成配置。</span>
+      <router-link class="notice-action" to="/settings">前往设置</router-link>
+    </div>
+
+    <nav class="task-nav" aria-label="迁移任务">
+      <button
+        v-for="task in mainTasks"
+        :key="task.id"
+        class="task-tab"
+        :class="{ active: activeTask === task.id }"
+        :aria-pressed="activeTask === task.id"
+        @click="selectTask(task.id)"
+      >
+        {{ task.label }}
+      </button>
+      <button class="friend-entry" :class="{ active: activeTask === 'friend' }" @click="selectTask('friend')">
+        导入朋友角色
+      </button>
+    </nav>
+
+    <div v-if="serverNeedsStop" class="notice notice--action">
+      <AppIcon name="info" :size="16" />
+      <span>服务器正在运行。存档操作需要先安全停服。</span>
+      <button class="btn btn-primary btn-sm" :disabled="operationPending" @click="stopServerAndContinue">
+        {{ operationPending ? progressLabel : '停止服务器并继续' }}
+      </button>
+      <button class="btn btn-ghost btn-sm" :disabled="operationPending" @click="cancelDeferredAction">取消</button>
+    </div>
+
+    <div v-if="operationPending" class="operation-status" role="status" aria-live="polite">
+      <span class="status-spinner" aria-hidden="true" />
+      <div>
+        <strong>{{ operationTitle }}</strong>
+        <span>{{ progressLabel }}</span>
       </div>
     </div>
 
-    <!-- D. 科技点 + 玩家属性 -->
-    <div class="sm-section">
-      <div class="section-title">④ 数据修改：科技点 + 玩家属性（P1）</div>
-      <div class="op-grid">
-        <div class="op-field">
-          <label class="char-label">世界</label>
-          <select v-model="editWorld" class="input" :disabled="!worlds.length">
-            <option value="">— 请选择 —</option>
-            <option v-for="w in worlds" :key="w.name" :value="w.name">{{ w.name }}</option>
+    <div v-if="operationError" class="notice notice--error" role="alert">
+      <AppIcon name="info" :size="16" />
+      <span>{{ operationError }}</span>
+      <button class="btn btn-ghost btn-sm" @click="operationError = ''">关闭</button>
+    </div>
+
+    <section v-if="activeTask === 'world'" class="task-panel" aria-labelledby="world-task-title">
+      <header class="task-head">
+        <div>
+          <h2 id="world-task-title">迁移整个世界</h2>
+          <p>将单机或其他服务器世界复制到当前专用服务器。目标世界会先完整备份。</p>
+        </div>
+      </header>
+
+      <div class="field-grid">
+        <label class="field">
+          <span>来源世界</span>
+          <select v-model="sourcePath" class="input" :disabled="loading || operationPending">
+            <option value="">请选择来源世界</option>
+            <optgroup v-if="localWorlds.length" label="本机单机">
+              <option v-for="world in localWorlds" :key="world.path" :value="world.path">
+                {{ world.name }} · {{ world.player_count }} 名角色
+              </option>
+            </optgroup>
+            <optgroup v-if="serverWorlds.length" label="服务器世界">
+              <option v-for="world in serverWorlds" :key="world.path" :value="world.path">
+                {{ world.name }} · {{ world.player_count }} 名角色
+              </option>
+            </optgroup>
           </select>
-        </div>
-        <div class="op-field">
-          <label class="char-label">玩家（单选）</label>
-          <PlayerPicker :world-name="editWorld" v-model="editPlayers" />
-        </div>
-      </div>
-
-      <div v-if="editPlayers.length" class="edit-block">
-        <div class="op-sub">玩家基础属性</div>
-        <div class="op-grid">
-          <div class="op-field">
-            <label class="char-label">改名（留空不改）</label>
-            <input v-model="rename" class="input" placeholder="新昵称" :disabled="busy" />
-          </div>
-          <div class="op-field">
-            <label class="char-label">等级（留空不改）</label>
-            <input v-model="levelStr" class="input" placeholder="如 50" :disabled="busy" />
-          </div>
-        </div>
-        <label class="chk-row">
-          <input type="checkbox" v-model="maxAll" />
-          <span>关键属性拉满（Max All）</span>
         </label>
-        <div class="sm-toolbar">
-          <button class="btn btn-ghost btn-sm" :disabled="busy || !canEditAttr" @click="onEditAttr">
-            {{ busy ? '处理中…' : '应用属性' }}
-          </button>
-        </div>
 
-        <div class="op-sub">科技点（解锁 / 移除，单项 + 批量）</div>
-        <TechEditorPanel :world="editWorld" :player-guid="editPlayers[0]" />
+        <label class="field">
+          <span>目标服务器世界</span>
+          <select v-model="targetWorldName" class="input" :disabled="loading || operationPending">
+            <option value="">请选择目标世界</option>
+            <option v-for="world in serverWorlds" :key="world.path" :value="world.name">
+              {{ world.name }} · {{ world.player_count }} 名角色
+            </option>
+          </select>
+        </label>
       </div>
-      <div v-else class="sm-empty sm-empty--sm">请选择世界与玩家以编辑科技点 / 属性。</div>
-    </div>
+
+      <div class="notice notice--config">
+        <AppIcon name="info" :size="16" />
+        <span><strong>保留当前服务器设置</strong>。来源世界规则不会直接应用，迁移完成后由“服务器配置”继续管理。</span>
+      </div>
+
+      <div class="task-actions">
+        <button class="btn btn-primary" :disabled="!canMigrateWorld || operationPending" @click="onMigrateIntent">
+          {{ operationPending && operationTitle === '迁移世界' ? progressLabel : '开始迁移' }}
+        </button>
+        <span>迁移不会在没有备份的情况下继续。</span>
+      </div>
+    </section>
+
+    <section v-else-if="activeTask === 'character'" class="task-panel" aria-labelledby="character-task-title">
+      <header class="task-head">
+        <div>
+          <h2 id="character-task-title">转移完整角色</h2>
+          <p>把原角色的等级、物品、帕鲁和科技等数据转到用于登录服务器的角色。</p>
+        </div>
+        <span class="contract-badge">公会关系不会改变</span>
+      </header>
+
+      <label class="field field--compact">
+        <span>迁移记录</span>
+        <select v-model="selectedWorkflowId" class="input" :disabled="operationPending" @change="loadWorkflowPlayers">
+          <option value="">请选择已迁移的世界</option>
+          <option v-for="(item, index) in availableWorkflows" :key="item.id" :value="item.id">
+            {{ workflowLabel(item, index) }}
+          </option>
+        </select>
+      </label>
+
+      <div v-if="playerLoading" class="empty-state">正在读取角色...</div>
+      <div v-else-if="selectedWorkflowId && !workflowPlayers.length" class="empty-state">
+        暂未读取到角色。请先用原账号进入服务器创建角色并正常退出，然后刷新。
+      </div>
+      <div v-else-if="workflowPlayers.length" class="player-columns">
+        <fieldset class="player-group">
+          <legend>要保留的原角色</legend>
+          <label v-for="player in workflowPlayers" :key="`source-${player.guid}`" class="player-option">
+            <input v-model="sourcePlayerFile" type="radio" name="source-player" :value="player.guid" />
+            <span><strong>{{ player.nickname || '未命名角色' }}</strong><small>{{ playerDescription(player) }}</small></span>
+          </label>
+        </fieldset>
+        <div class="transfer-direction" aria-hidden="true">→</div>
+        <fieldset class="player-group">
+          <legend>用于登录的服务器角色</legend>
+          <label v-for="player in workflowPlayers" :key="`target-${player.guid}`" class="player-option">
+            <input v-model="targetPlayerFile" type="radio" name="target-player" :value="player.guid" />
+            <span><strong>{{ player.nickname || '未命名角色' }}</strong><small>{{ playerDescription(player) }}</small></span>
+          </label>
+        </fieldset>
+      </div>
+
+      <div class="task-actions">
+        <button class="btn btn-primary" :disabled="!canTransferCharacter || operationPending" @click="startCharacterTransfer">
+          {{ operationPending && operationTitle === '转移完整角色' ? progressLabel : '转移完整角色' }}
+        </button>
+        <button class="btn btn-ghost" :disabled="!selectedWorkflowId || operationPending" @click="loadWorkflowPlayers">刷新角色</button>
+      </div>
+    </section>
+
+    <section v-else-if="activeTask === 'guild'" class="task-panel" aria-labelledby="guild-task-title">
+      <header class="task-head">
+        <div>
+          <h2 id="guild-task-title">恢复原公会</h2>
+          <p>仅把已经转移的单机主角色恢复到原公会，不改变角色数据。</p>
+        </div>
+      </header>
+
+      <label class="field field--compact">
+        <span>迁移记录</span>
+        <select v-model="selectedWorkflowId" class="input" :disabled="operationPending" @change="loadGuildSummary">
+          <option value="">请选择已完成角色转移的世界</option>
+          <option v-for="(item, index) in guildReadyWorkflows" :key="item.id" :value="item.id">
+            {{ workflowLabel(item, index) }}
+          </option>
+        </select>
+      </label>
+
+      <div v-if="selectedWorkflowId" class="identity-summary">
+        <div><span>单机主角色</span><strong>{{ guildSummary.playerName }}</strong></div>
+        <div><span>原公会</span><strong>{{ guildSummary.guildName }}</strong></div>
+        <p v-if="!selectedWorkflow?.identity">当前记录缺少可用的角色识别信息，无法恢复原公会。</p>
+      </div>
+      <div v-else class="empty-state">请选择一条已完成完整角色转移的迁移记录。</div>
+
+      <div class="task-actions">
+        <button class="btn btn-primary" :disabled="!canRestoreGuild || operationPending" @click="startGuildRestore">
+          {{ operationPending && operationTitle === '恢复原公会' ? progressLabel : '恢复原公会' }}
+        </button>
+      </div>
+    </section>
+
+    <section v-else class="task-panel friend-transfer-panel" aria-labelledby="friend-task-title">
+      <header class="task-head">
+        <div>
+          <h2 id="friend-task-title">导入朋友角色</h2>
+          <p>把朋友的完整角色数据导入目标世界。此操作独立于单机主角色迁移。</p>
+        </div>
+      </header>
+
+      <div class="field-grid">
+        <label class="field">
+          <span>朋友角色所在世界</span>
+          <select v-model="friendSourceWorldPath" class="input" @change="loadFriendSourcePlayers">
+            <option value="">请选择来源世界</option>
+            <option v-for="world in allWorlds" :key="world.path" :value="world.path">{{ world.name }}</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>目标服务器世界</span>
+          <select v-model="friendTargetWorldPath" class="input" @change="loadFriendTargetPlayers">
+            <option value="">请选择目标世界</option>
+            <option v-for="world in serverWorlds" :key="world.path" :value="world.path">{{ world.name }}</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="player-columns">
+        <fieldset class="player-group">
+          <legend>朋友的原角色</legend>
+          <div v-if="!friendSourcePlayers.length" class="empty-state">选择来源世界后读取角色。</div>
+          <label v-for="player in friendSourcePlayers" :key="`friend-source-${player.guid}`" class="player-option">
+            <input v-model="friendSourcePlayerFile" type="radio" name="friend-source-player" :value="player.guid" />
+            <span><strong>{{ player.nickname || '未命名角色' }}</strong><small>{{ playerDescription(player) }}</small></span>
+          </label>
+        </fieldset>
+        <div class="transfer-direction" aria-hidden="true">→</div>
+        <fieldset class="player-group">
+          <legend>朋友用于登录的服务器角色</legend>
+          <div v-if="!friendTargetPlayers.length" class="empty-state">选择目标世界后读取角色。</div>
+          <label v-for="player in friendTargetPlayers" :key="`friend-target-${player.guid}`" class="player-option">
+            <input v-model="friendTargetPlayerFile" type="radio" name="friend-target-player" :value="player.guid" />
+            <span><strong>{{ player.nickname || '未命名角色' }}</strong><small>{{ playerDescription(player) }}</small></span>
+          </label>
+        </fieldset>
+      </div>
+
+      <div class="task-actions">
+        <button class="btn btn-primary" :disabled="!canImportFriend || operationPending" @click="startFriendImport">
+          {{ operationPending && operationTitle === '导入朋友角色' ? progressLabel : '导入朋友角色' }}
+        </button>
+        <span>不会更改任何公会关系。</span>
+      </div>
+    </section>
+
+    <section v-if="result" class="result-panel" aria-live="polite">
+      <div>
+        <strong>{{ result.title }}</strong>
+        <p>{{ result.message }}</p>
+      </div>
+      <div class="result-actions">
+        <button v-if="result.nextTask" class="btn btn-primary btn-sm" @click="continueTo(result.nextTask)">
+          {{ result.nextTask === 'character' ? '继续转移角色' : '继续恢复原公会' }}
+        </button>
+        <button v-if="result.canComplete" class="btn btn-success btn-sm" :disabled="operationPending" @click="completeWorkflow">
+          验证正常，完成
+        </button>
+        <button class="btn btn-danger-ghost btn-sm" :disabled="operationPending" @click="rollbackWorkflow">
+          发现问题，回滚
+        </button>
+      </div>
+    </section>
 
     <ConfirmDialog
-      v-model:visible="confirmVisible"
-      :title="confirmTitle"
-      :message="confirmMessage"
-      :danger="true"
-      @confirm="onConfirmOk"
+      v-model:visible="migrationNoticeVisible"
+      title="迁移前会自动备份"
+      :message="`目标世界会先备份到 ${backupRoot || '程序默认备份目录'}。只有备份成功后才会开始迁移；如果该目录不可用，迁移会停止。`"
+      confirm-text="开始迁移"
+      cancel-text="取消"
+      @confirm="confirmMigration"
     />
   </section>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { useToast } from '@/components/ui/useToast'
-import { useSettingsStore } from '@/stores/settings'
 import { api } from '@/api/tauri'
 import AppIcon from '@/components/ui/AppIcon.vue'
 import ConfirmDialog from '@/components/ui/ConfirmDialog.vue'
-import PlayerPicker from '@/components/save/PlayerPicker.vue'
-import TechEditorPanel from '@/components/save/TechEditorPanel.vue'
-import type { WorldInfo, EditResult } from '@/types/tauri'
+import { useSettingsStore } from '@/stores/settings'
+import type {
+  MigrationWorkflow,
+  PlayerEntry,
+  SaveOperationProgress,
+  WorldInfo,
+} from '@/types/tauri'
 
-const toast = useToast()
-const settingsStore = useSettingsStore()
+type MainTask = 'world' | 'character' | 'guild'
+type ActiveTask = MainTask | 'friend'
+type DeferredAction = () => Promise<void>
+
+interface OperationResultState {
+  title: string
+  message: string
+  workflowId: string
+  nextTask?: MainTask
+  canComplete: boolean
+}
+
 const route = useRoute()
+const settingsStore = useSettingsStore()
 
-// server_path 缺失时不静默扫默认目录，显式引导去设置（Q8）
-const serverPathMissing = computed(() => !settingsStore.settings.server_path)
+const mainTasks: Array<{ id: MainTask; label: string }> = [
+  { id: 'world', label: '迁移整个世界' },
+  { id: 'character', label: '转移完整角色' },
+  { id: 'guild', label: '恢复原公会' },
+]
 
+const activeTask = ref<ActiveTask>('world')
 const loading = ref(false)
-const busy = ref(false)
-const worlds = ref<WorldInfo[]>([])
-const saveRoot = ref('')
-const autoDiscovered = ref(false)
+const operationPending = ref(false)
+const operationTitle = ref('')
+const progressLabel = ref('')
+const operationError = ref('')
+const currentRequestId = ref('')
+const deferredAction = ref<DeferredAction | null>(null)
+const serverNeedsStop = ref(false)
+const migrationNoticeVisible = ref(false)
+const result = ref<OperationResultState | null>(null)
 
-// 来自「本地存档」页的迁移请求（route.query.source=路径 & type=local）
-const pendingLocalSource = ref('')
-const pendingLocalName = ref('')
+const localWorlds = ref<WorldInfo[]>([])
+const serverWorlds = ref<WorldInfo[]>([])
+const workflows = ref<MigrationWorkflow[]>([])
+const sourcePath = ref('')
+const targetWorldName = ref('')
+const backupRoot = ref('')
 
-const sourceWorld = ref('')
-const targetWorld = ref('')
-// 源类型：'server'（默认，sourceWorld 为世界名）| 'local'（来自本地存档页的本地绝对路径）
-const sourceType = ref<'server' | 'local'>('server')
+const selectedWorkflowId = ref('')
+const workflowPlayers = ref<PlayerEntry[]>([])
+const playerLoading = ref(false)
+const sourcePlayerFile = ref('')
+const targetPlayerFile = ref('')
+const guildSummary = ref({ playerName: '未知', guildName: '未知' })
 
-// A. 修复主机存档（角色卡选择，不再手填 GUID）
-const fixWorld = ref('')
-const oldHostGuids = ref<string[]>([])
-const newCharGuids = ref<string[]>([])
+const friendSourceWorldPath = ref('')
+const friendTargetWorldPath = ref('')
+const friendSourcePlayers = ref<PlayerEntry[]>([])
+const friendTargetPlayers = ref<PlayerEntry[]>([])
+const friendSourcePlayerFile = ref('')
+const friendTargetPlayerFile = ref('')
 
-// B. Migrate
-const deleteWorldOption = ref(false)
+let unlistenProgress: (() => void) | null = null
 
-// D. Tech / Attr
-const editWorld = ref('')
-const editPlayers = ref<string[]>([])
-const rename = ref('')
-const levelStr = ref('')
-const maxAll = ref(false)
-
-// Confirm dialog
-const confirmVisible = ref(false)
-const confirmTitle = ref('')
-const confirmMessage = ref('')
-let pendingFn: (() => Promise<EditResult>) | null = null
-
-const canFixHost = computed(
-  () =>
-    !!sourceWorld.value &&
-    !!targetWorld.value &&
-    oldHostGuids.value.length === 1 &&
-    newCharGuids.value.length === 1 &&
-    oldHostGuids.value[0] !== newCharGuids.value[0],
-)
-const canMigrate = computed(() => {
-  // 本地源：sourceType==='local' 时用 pendingLocalSource（绝对路径），仅需目标世界已选
-  if (sourceType.value === 'local') {
-    return !!pendingLocalSource.value && !!targetWorld.value
-  }
-  // 服务器源：仍需选源 + 目标且两者不同
-  return (
-    !!sourceWorld.value &&
-    !!targetWorld.value &&
-    sourceWorld.value !== targetWorld.value
-  )
+const serverPathMissing = computed(() => !settingsStore.settings.server_path)
+const allWorlds = computed(() => [...localWorlds.value, ...serverWorlds.value])
+const availableWorkflows = computed(() => workflows.value.filter((item) =>
+  !['committed', 'rolled_back', 'recovery_required'].includes(item.status),
+))
+const guildReadyWorkflows = computed(() => availableWorkflows.value.filter((item) =>
+  ['character_transferred', 'guild_restored', 'awaiting_game_verification'].includes(item.stage),
+))
+const selectedWorkflow = computed(() => workflows.value.find((item) => item.id === selectedWorkflowId.value) ?? null)
+const canMigrateWorld = computed(() => {
+  const source = allWorlds.value.find((item) => item.path === sourcePath.value)
+  const target = serverWorlds.value.find((item) => item.name === targetWorldName.value)
+  return !!source && !!target && target.path !== source.path && !serverPathMissing.value
 })
-const canEditAttr = computed(() => !!editWorld.value && editPlayers.value.length > 0)
+const canTransferCharacter = computed(() =>
+  !!selectedWorkflowId.value && !!sourcePlayerFile.value && !!targetPlayerFile.value && sourcePlayerFile.value !== targetPlayerFile.value,
+)
+const canRestoreGuild = computed(() => !!selectedWorkflowId.value && !!selectedWorkflow.value?.identity)
+const canImportFriend = computed(() =>
+  !!friendSourceWorldPath.value &&
+  !!friendTargetWorldPath.value &&
+  !!friendSourcePlayerFile.value &&
+  !!friendTargetPlayerFile.value &&
+  friendSourcePlayerFile.value !== friendTargetPlayerFile.value,
+)
+
+function newRequestId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `save-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+function selectTask(task: ActiveTask): void {
+  activeTask.value = task
+  operationError.value = ''
+}
 
 async function onDiscover(): Promise<void> {
   loading.value = true
+  operationError.value = ''
   try {
-    const res = await api.save.discoverWorlds()
-    worlds.value = res.worlds
-    saveRoot.value = res.save_root
-    autoDiscovered.value = res.auto_discovered
-    if (res.worlds.length && !res.worlds.some((w) => w.name === sourceWorld.value)) {
-      sourceWorld.value = res.worlds[0].name
-    }
-    if (res.worlds.length && !res.worlds.some((w) => w.name === targetWorld.value)) {
-      targetWorld.value = res.worlds[0].name
-    }
-    if (!fixWorld.value && targetWorld.value) {
-      fixWorld.value = targetWorld.value
-    }
-    toast.info(`已发现 ${res.worlds.length} 个世界`)
-  } catch (e) {
-    toast.error(`检测世界失败: ${e instanceof Error ? e.message : String(e)}`)
+    const resolvedBackupRoot = await api.save.getBackupRoot()
+    const excludedBackupRoots = [
+      resolvedBackupRoot,
+      settingsStore.settings.backup_root,
+      ...(settingsStore.settings.backup_roots ?? []),
+    ].filter(Boolean)
+    const localRoots = (settingsStore.settings.local_save_roots ?? []).filter((root) =>
+      !excludedBackupRoots.some((backup) => sameDirectory(root, backup)),
+    )
+    const serverRoots = settingsStore.settings.server_save_roots ?? []
+    const [localResults, serverResults, workflowResults] = await Promise.all([
+      Promise.all([api.save.discoverLocalWorlds(), ...localRoots.map((root) => api.save.discoverLocalWorlds(root))]),
+      Promise.all([api.save.discoverWorlds(), ...serverRoots.map((root) => api.save.discoverWorlds(root))]),
+      api.save.listWorkflows(),
+    ])
+    localWorlds.value = dedupeWorlds(localResults.flat())
+    serverWorlds.value = dedupeWorlds(serverResults.flatMap((item) => item.worlds))
+    workflows.value = workflowResults
+    backupRoot.value = resolvedBackupRoot
+
+    const requestedSource = typeof route.query.source === 'string' ? route.query.source : ''
+    if (requestedSource && allWorlds.value.some((world) => world.path === requestedSource)) sourcePath.value = requestedSource
+    if (!sourcePath.value) sourcePath.value = localWorlds.value[0]?.path ?? ''
+    if (!targetWorldName.value) targetWorldName.value = serverWorlds.value[0]?.name ?? ''
+  } catch (error) {
+    operationError.value = `读取存档失败：${errorMessage(error)}`
   } finally {
     loading.value = false
   }
 }
 
-async function onStopServer(): Promise<void> {
-  try {
-    const st = await api.server.getStatus()
-    if (st.running) {
-      await api.server.stop()
-      toast.info('已停止服务器')
-    } else {
-      toast.info('服务器本就未运行')
-    }
-  } catch (e) {
-    toast.error(`停止服务器失败: ${e instanceof Error ? e.message : String(e)}`)
-  }
+function sameDirectory(left: string, right: string): boolean {
+  const normalize = (value: string) => value.replace(/[\\/]+$/, '').toLocaleLowerCase()
+  return normalize(left) === normalize(right)
 }
 
-async function ensureStopped(): Promise<void> {
-  try {
-    const st = await api.server.getStatus()
-    if (st.running) {
-      await api.server.stop()
-    }
-  } catch {
-    // 忽略状态读取失败，交给后端做运行态断言
-  }
+function dedupeWorlds(items: WorldInfo[]): WorldInfo[] {
+  return [...new Map(items.map((item) => [item.path, item])).values()].sort((left, right) => left.name.localeCompare(right.name))
 }
 
-async function runOp(label: string, fn: () => Promise<EditResult>): Promise<void> {
-  busy.value = true
-  try {
-    await ensureStopped()
-    const res = await fn()
-    if (res.ok) {
-      toast.success(
-        `${label}成功（备份 ${res.backup_id || '—'}，round-trip ${res.roundtrip_ok ? '通过' : '有警告'}${
-          res.warnings.length ? ' · ' + res.warnings.join('；') : ''
-        }）`,
-      )
-    } else {
-      toast.error(`${label}失败：${res.warnings.join('；')}`)
-    }
-  } catch (e) {
-    toast.error(`${label}失败: ${e instanceof Error ? e.message : String(e)}`)
-  } finally {
-    busy.value = false
-  }
+function workflowLabel(item: MigrationWorkflow, index: number): string {
+  const world = serverWorlds.value.find((candidate) => candidate.path === item.target_world_path)
+  return world?.name ?? `迁移记录 ${index + 1}`
 }
 
-function requestConfirm(title: string, message: string, fn: () => Promise<EditResult>): void {
-  confirmTitle.value = title
-  confirmMessage.value = message
-  pendingFn = fn
-  confirmVisible.value = true
+function playerDescription(player: PlayerEntry): string {
+  const guild = player.guild_id ? '已有公会' : '无公会'
+  return `等级 ${player.level} · ${guild} · ${player.pal_count} 只帕鲁 · ${player.last_online || '上次在线未知'}`
 }
 
-async function onConfirmOk(): Promise<void> {
-  if (pendingFn) {
-    const fn = pendingFn
-    pendingFn = null
-    await runOp(confirmTitle.value, fn)
-  }
-}
-
-function onFixHost(): void {
-  if (!canFixHost.value) return
-  const oldGuid = oldHostGuids.value[0]
-  const newGuid = newCharGuids.value[0]
-  requestConfirm(
-    '修复主机存档',
-    `即将把世界「${fixWorld.value}」内旧主机角色(${oldGuid}) 与 新角色(${newGuid}) 的 UID 互换。操作前自动备份，需确保服务器已停止。确认继续？`,
-    () =>
-      api.migration.fixHostSave({
-        world: fixWorld.value,
-        old_host_guid: oldGuid,
-        new_char_guid: newGuid,
-      }),
-  )
-}
-
-function onMigrate(): void {
-  if (!canMigrate.value) return
-  const isLocal = sourceType.value === 'local'
-  // 本地源用绝对路径（pendingLocalSource / route.query.source），服务器源用世界名下拉
-  const srcVal = isLocal ? pendingLocalSource.value : sourceWorld.value
-  const srcLabel = isLocal ? pendingLocalName.value || srcVal : sourceWorld.value
-  requestConfirm(
-    '整包世界迁移',
-    `即将把世界「${srcLabel}」整体拷贝到「${targetWorld.value}」（含 Level.sav + Players/）。操作前自动备份目标世界。确认继续？`,
-    () =>
-      api.migration.migrateWorld({
-        source_world: srcVal,
-        target_world: targetWorld.value,
-        delete_world_option: deleteWorldOption.value,
-        source_type: isLocal ? 'local' : 'server',
-      }),
-  )
-}
-
-function onEditAttr(): void {
-  if (!canEditAttr.value) return
-  const guid = editPlayers.value[0]
-  const level = levelStr.value.trim() === '' ? null : Number(levelStr.value)
-  if (levelStr.value.trim() !== '' && (level === null || Number.isNaN(level) || level < 1)) {
-    toast.error('等级需为正整数')
+function onMigrateIntent(): void {
+  if (!canMigrateWorld.value) return
+  if (!settingsStore.settings.migration_backup_notice_seen) {
+    migrationNoticeVisible.value = true
     return
   }
-  void runOp('属性编辑', () =>
-    api.migration.editPlayerAttr({
-      world: editWorld.value,
-      player_guid: guid,
-      rename: rename.value.trim() === '' ? null : rename.value.trim(),
-      level,
-      max_all: maxAll.value,
-    }),
-  )
+  void gateServerAndRun(runWorldMigration)
 }
 
-/** 接收来自「本地存档」页的迁移请求（route.query.source=路径 & type=local），预选源档 */
-function applyPendingSource(): void {
-  const src = (route.query.source as string) ?? ''
-  const type = (route.query.type as string) ?? ''
-  if (src && type === 'local') {
-    pendingLocalSource.value = src
-    sourceType.value = 'local' // 标记本地源类型，onMigrate 据此走本地绝对路径分支
-    const name = src.split(/[\\/]/).filter(Boolean).pop() ?? ''
-    pendingLocalName.value = name
-    // 若服务器世界中存在同名世界，直接预选为源世界（便于仅目标选择场景）
-    if (name && worlds.value.some((w) => w.name === name)) {
-      sourceWorld.value = name
+async function confirmMigration(): Promise<void> {
+  settingsStore.update({ migration_backup_notice_seen: true })
+  try {
+    await settingsStore.save()
+  } catch (error) {
+    settingsStore.update({ migration_backup_notice_seen: false })
+    operationError.value = `无法保存迁移说明状态：${errorMessage(error)}`
+    return
+  }
+  void gateServerAndRun(runWorldMigration)
+}
+
+async function runWorldMigration(): Promise<void> {
+  const source = allWorlds.value.find((item) => item.path === sourcePath.value)
+  if (!source) return
+  await runOperation('迁移世界', async () => {
+    const outcome = await api.migration.migrateWorldV4({
+      request_id: currentRequestId.value,
+      source_path: source.path,
+      source_name: source.name,
+      target_world: targetWorldName.value,
+      preserve_server_config: true,
+    })
+    selectedWorkflowId.value = outcome.workflow.id
+    workflows.value = [outcome.workflow, ...workflows.value.filter((item) => item.id !== outcome.workflow.id)]
+    result.value = {
+      title: '世界迁移完成',
+      message: '目标世界已写入并保留操作前备份。服务器规则仍由配置页管理。请进入服务器创建用于登录的新角色，再继续转移完整角色。',
+      workflowId: outcome.workflow.id,
+      nextTask: 'character',
+      canComplete: false,
     }
+  })
+}
+
+async function loadWorkflowPlayers(): Promise<void> {
+  sourcePlayerFile.value = ''
+  targetPlayerFile.value = ''
+  workflowPlayers.value = []
+  if (!selectedWorkflow.value) return
+  playerLoading.value = true
+  try {
+    const summary = await api.migration.worldSummaryByPath(selectedWorkflow.value.target_world_path)
+    workflowPlayers.value = summary.players
+  } catch (error) {
+    operationError.value = `读取角色失败：${errorMessage(error)}`
+  } finally {
+    playerLoading.value = false
   }
 }
 
-onMounted(() => {
-  void onDiscover().then(applyPendingSource)
+function startCharacterTransfer(): void {
+  if (!canTransferCharacter.value) return
+  void gateServerAndRun(async () => {
+    await runOperation('转移完整角色', async () => {
+      const outcome = await api.migration.transferFullCharacterV4({
+        request_id: currentRequestId.value,
+        workflow_id: selectedWorkflowId.value,
+        source_player_file: sourcePlayerFile.value,
+        target_player_file: targetPlayerFile.value,
+      })
+      replaceWorkflow(outcome.workflow)
+      result.value = {
+        title: '完整角色转移完成',
+        message: '角色数据已转移，公会关系未改变。请进入游戏检查角色。',
+        workflowId: outcome.workflow.id,
+        nextTask: outcome.workflow.identity ? 'guild' : undefined,
+        canComplete: true,
+      }
+    })
+  })
+}
+
+async function loadGuildSummary(): Promise<void> {
+  guildSummary.value = { playerName: '未知', guildName: '未知' }
+  const item = selectedWorkflow.value
+  if (!item?.identity) return
+  try {
+    const summary = await api.migration.worldSummaryByPath(item.target_world_path)
+    const player = summary.players.find((candidate) => candidate.player_uid === item.identity?.target_player_uid)
+    const guild = summary.guilds.find((candidate) => candidate.guild_id === item.identity?.source_group_id)
+    guildSummary.value = {
+      playerName: player?.nickname || '名称未知',
+      guildName: guild?.name || '名称未知',
+    }
+  } catch {
+    guildSummary.value = { playerName: '名称未知', guildName: '名称未知' }
+  }
+}
+
+function startGuildRestore(): void {
+  if (!canRestoreGuild.value) return
+  void gateServerAndRun(async () => {
+    await runOperation('恢复原公会', async () => {
+      const outcome = await api.migration.restoreOriginalGuildV4({
+        request_id: currentRequestId.value,
+        workflow_id: selectedWorkflowId.value,
+      })
+      replaceWorkflow(outcome.workflow)
+      result.value = {
+        title: '原公会已恢复',
+        message: '单机主角色已恢复到后端识别的原公会。请进入游戏检查。',
+        workflowId: outcome.workflow.id,
+        canComplete: true,
+      }
+    })
+  })
+}
+
+async function loadFriendSourcePlayers(): Promise<void> {
+  friendSourcePlayerFile.value = ''
+  friendSourcePlayers.value = await loadPlayersAt(friendSourceWorldPath.value)
+}
+
+async function loadFriendTargetPlayers(): Promise<void> {
+  friendTargetPlayerFile.value = ''
+  friendTargetPlayers.value = await loadPlayersAt(friendTargetWorldPath.value)
+}
+
+async function loadPlayersAt(path: string): Promise<PlayerEntry[]> {
+  if (!path) return []
+  try {
+    return (await api.migration.worldSummaryByPath(path)).players
+  } catch (error) {
+    operationError.value = `读取角色失败：${errorMessage(error)}`
+    return []
+  }
+}
+
+function startFriendImport(): void {
+  if (!canImportFriend.value) return
+  void gateServerAndRun(async () => {
+    await runOperation('导入朋友角色', async () => {
+      const outcome = await api.migration.importFriendCharacterV4({
+        request_id: currentRequestId.value,
+        source_world_path: friendSourceWorldPath.value,
+        target_world_path: friendTargetWorldPath.value,
+        source_player_file: friendSourcePlayerFile.value,
+        target_player_file: friendTargetPlayerFile.value,
+      })
+      replaceWorkflow(outcome.workflow)
+      result.value = {
+        title: '朋友角色导入完成',
+        message: '完整角色数据已导入，任何公会关系都未更改。请让朋友进入游戏检查。',
+        workflowId: outcome.workflow.id,
+        canComplete: true,
+      }
+    })
+  })
+}
+
+async function gateServerAndRun(action: DeferredAction): Promise<void> {
+  if (operationPending.value) return
+  operationPending.value = true
+  operationTitle.value = '准备操作'
+  progressLabel.value = '正在检查服务器'
+  operationError.value = ''
+  try {
+    const status = await api.server.getStatus()
+    if (status.running) {
+      deferredAction.value = action
+      serverNeedsStop.value = true
+      return
+    }
+    await action()
+  } catch (error) {
+    operationError.value = `无法检查服务器：${errorMessage(error)}`
+  } finally {
+    if (serverNeedsStop.value || operationTitle.value === '准备操作') operationPending.value = false
+  }
+}
+
+async function stopServerAndContinue(): Promise<void> {
+  const action = deferredAction.value
+  if (!action || operationPending.value) return
+  operationPending.value = true
+  operationTitle.value = '停止服务器'
+  progressLabel.value = '正在停止服务器'
+  operationError.value = ''
+  try {
+    await api.server.stop()
+    serverNeedsStop.value = false
+    deferredAction.value = null
+    await action()
+  } catch (error) {
+    operationError.value = `停止服务器失败：${errorMessage(error)}`
+  } finally {
+    if (operationTitle.value === '停止服务器') operationPending.value = false
+  }
+}
+
+function cancelDeferredAction(): void {
+  deferredAction.value = null
+  serverNeedsStop.value = false
+}
+
+async function runOperation(title: string, operation: () => Promise<void>): Promise<void> {
+  operationPending.value = true
+  operationTitle.value = title
+  progressLabel.value = '正在开始'
+  operationError.value = ''
+  result.value = null
+  currentRequestId.value = newRequestId()
+  try {
+    await operation()
+  } catch (error) {
+    operationError.value = `${title}未完成：${errorMessage(error)}`
+  } finally {
+    operationPending.value = false
+    currentRequestId.value = ''
+  }
+}
+
+function onProgress(progress: SaveOperationProgress): void {
+  if (progress.request_id !== currentRequestId.value) return
+  progressLabel.value = progress.label
+}
+
+function replaceWorkflow(item: MigrationWorkflow): void {
+  workflows.value = [item, ...workflows.value.filter((existing) => existing.id !== item.id)]
+  selectedWorkflowId.value = item.id
+}
+
+function continueTo(task: MainTask): void {
+  if (!result.value) return
+  selectedWorkflowId.value = result.value.workflowId
+  activeTask.value = task
+  if (task === 'character') void loadWorkflowPlayers()
+  if (task === 'guild') void loadGuildSummary()
+}
+
+async function completeWorkflow(): Promise<void> {
+  if (!result.value) return
+  await runOperation('完成迁移', async () => {
+    const item = await api.migration.completeMigrationWorkflowV4({
+      request_id: currentRequestId.value,
+      workflow_id: result.value!.workflowId,
+    })
+    replaceWorkflow(item)
+    result.value = null
+  })
+}
+
+function rollbackWorkflow(): void {
+  if (!result.value) return
+  const workflowId = result.value.workflowId
+  void gateServerAndRun(async () => {
+    await runOperation('回滚迁移', async () => {
+      const item = await api.migration.rollbackMigrationWorkflowV4({
+        request_id: currentRequestId.value,
+        workflow_id: workflowId,
+      })
+      replaceWorkflow(item)
+      result.value = null
+    })
+  })
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+onMounted(async () => {
+  unlistenProgress = await api.migration.onProgress(onProgress)
+  await onDiscover()
 })
+
+onBeforeUnmount(() => unlistenProgress?.())
 </script>
 
 <style scoped>
-.sm-banner {
+.migration-screen { gap: 16px; }
+.notice,
+.operation-status,
+.result-panel {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
+  background: rgba(255, 252, 247, 0.74);
+  color: var(--text-mid);
+  font-size: 13px;
+}
+.notice > span { flex: 1; }
+.notice--warn { border-color: rgba(184, 120, 47, 0.34); background: var(--amber-bg); }
+.notice--error { border-color: rgba(201, 85, 77, 0.38); background: var(--red-bg); color: var(--red-soft); }
+.notice--action { border-color: rgba(230, 111, 81, 0.34); }
+.notice--config { align-items: flex-start; border-color: rgba(75, 120, 150, 0.28); background: rgba(75, 120, 150, 0.07); }
+.notice--config strong { color: var(--text-hi); }
+.notice-action { margin-left: auto; color: var(--primary-active); font-weight: 600; }
+.task-nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 42px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--glass-border);
+  overflow-x: auto;
+}
+.task-tab,
+.friend-entry {
+  flex: 0 0 auto;
+  height: 34px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-mid);
+  font: 600 13px var(--font-ui);
+  cursor: pointer;
+}
+.task-tab.active,
+.friend-entry.active { background: var(--primary-soft); color: var(--primary-active); }
+.friend-entry { margin-left: auto; border: 1px solid var(--glass-border); }
+.task-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 4px 0 12px;
+}
+.task-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.task-head h2 { margin: 0; font-size: 17px; color: var(--text-hi); }
+.task-head p { margin-top: 6px; color: var(--text-mid2); font-size: 13px; line-height: 1.6; }
+.contract-badge { flex: 0 0 auto; padding: 5px 9px; border-radius: 999px; background: var(--green-bg); color: var(--green); font-size: 12px; font-weight: 600; }
+.field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.field { display: flex; flex-direction: column; gap: 6px; min-width: 0; color: var(--text-mid); font-size: 13px; font-weight: 600; }
+.field--compact { max-width: 460px; }
+.field .input { width: 100%; font-family: var(--font-ui); }
+.choice-group,
+.player-group { min-width: 0; margin: 0; padding: 0; border: 0; }
+.choice-group legend,
+.player-group legend { margin-bottom: 8px; color: var(--text-mid); font-size: 13px; font-weight: 700; }
+.choice-group { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.choice-group legend { grid-column: 1 / -1; }
+.choice-row,
+.player-option {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
-  padding: 10px 14px;
-  border-radius: var(--r-card);
-  background: var(--amber-bg, rgba(184, 120, 47, 0.14));
-  border: 1px solid rgba(184, 120, 47, 0.3);
-  font-size: 13px;
-  line-height: 1.5;
-  color: var(--text-mid, #77675f);
-  margin-bottom: 8px;
-}
-.sm-banner--ok {
-  background: var(--green-bg, rgba(79, 138, 107, 0.14));
-  border-color: rgba(79, 138, 107, 0.3);
-}
-.sm-banner--warn {
-  background: rgba(230, 111, 81, 0.1);
-  border-color: rgba(230, 111, 81, 0.28);
-}
-.sm-banner--info {
-  background: var(--primary-soft, rgba(230, 111, 81, 0.14));
-  border-color: rgba(230, 111, 81, 0.32);
-}
-.sm-banner code {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  background: rgba(116, 88, 72, 0.1);
-  padding: 1px 5px;
-  border-radius: 5px;
-}
-.sm-section {
-  margin-top: 14px;
-  padding: 16px 18px;
-  border-radius: var(--r-card);
-  background: var(--glass-bg, rgba(255, 252, 247, 0.72));
-  backdrop-filter: var(--glass-blur);
-  border: 1px solid var(--glass-border, rgba(116, 88, 72, 0.14));
-}
-.section-title {
-  font-size: 15px;
-  font-weight: 700;
-  color: var(--palwarm-text-primary, #3f322c);
-  margin-bottom: 12px;
-}
-.world-cols,
-.op-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 12px;
-  margin-bottom: 14px;
-  align-items: start;
-}
-.op-field {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-.char-label {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-mid, #77675f);
-  white-space: normal;
-  line-height: 1.4;
-}
-.input {
-  height: 34px;
-  padding: 0 12px;
-  border-radius: 9px;
-  border: 1px solid var(--glass-border, rgba(116, 88, 72, 0.2));
-  background: rgba(255, 255, 255, 0.7);
-  color: var(--palwarm-text-primary, #3f322c);
-  font-size: 13px;
-  outline: none;
-}
-.input:focus {
-  border-color: var(--primary, #e66f51);
-}
-.chk-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  color: var(--text-mid, #77675f);
-  margin: 4px 0 12px;
-  cursor: pointer;
-}
-.op-sub {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-mid, #77675f);
-  margin: 10px 0 8px;
-}
-.sm-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin-top: 10px;
-}
-.sm-hint {
-  font-size: 12px;
-  color: var(--text-mid2, #8a7a6e);
-}
-.edit-block {
-  margin-top: 6px;
-}
-.sm-empty {
-  padding: 16px;
-  border-radius: 12px;
-  background: var(--glass-bg-soft, rgba(255, 250, 244, 0.5));
-  border: 1px solid var(--glass-border, rgba(116, 88, 72, 0.14));
-  font-size: 13px;
-  color: var(--text-mid2, #8a7a6e);
-}
-.sm-empty--sm {
-  padding: 10px 14px;
-  font-size: 12px;
-}
-/* ====== ① 修复主机存档：左旧主机角色 / 右新角色 / 中箭头 三段式 ====== */
-.transfer-guide {
-  font-size: 13px;
-  color: var(--text-mid, #77675f);
-  background: var(--primary-soft, rgba(230, 111, 81, 0.12));
-  border: 1px solid rgba(230, 111, 81, 0.28);
-  border-radius: 9px;
-  padding: 8px 12px;
-  margin-bottom: 12px;
-  line-height: 1.5;
-}
-.transfer-cols {
-  display: grid;
-  grid-template-columns: 1fr auto 1fr;
-  gap: 14px;
-  align-items: start;
-}
-.transfer-col {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   min-width: 0;
-}
-.transfer-col .input {
-  width: 100%;
-}
-.transfer-arrow {
-  align-self: center;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding-top: 26px;
-  color: var(--primary, #e66f51);
-  font-size: 28px;
-}
-.arrow-narrow {
-  display: none;
-}
-@media (max-width: 720px) {
-  .transfer-cols {
-    grid-template-columns: 1fr;
-  }
-  .transfer-arrow {
-    padding-top: 0;
-    padding: 6px 0;
-  }
-  .arrow-wide {
-    display: none;
-  }
-  .arrow-narrow {
-    display: inline;
-  }
-}
-.btn {
-  border: none;
-  border-radius: 9px;
-  padding: 8px 16px;
-  font-size: 13px;
-  font-weight: 600;
+  padding: 11px 12px;
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.45);
   cursor: pointer;
 }
-.btn-primary {
-  background: var(--primary, #e66f51);
-  color: #fff;
-}
-.btn-ghost {
-  background: rgba(116, 88, 72, 0.08);
-  color: var(--text-mid, #77675f);
-}
-.btn-sm {
-  padding: 6px 12px;
-  font-size: 12px;
-}
-.btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+.choice-row:has(input:checked),
+.player-option:has(input:checked) { border-color: var(--primary); background: var(--primary-soft); }
+.choice-row input,
+.player-option input { margin-top: 3px; accent-color: var(--primary); }
+.choice-row span,
+.player-option span { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.choice-row strong,
+.player-option strong { color: var(--text-hi); font-size: 13px; }
+.choice-row small,
+.player-option small { color: var(--text-mid2); font-size: 11px; line-height: 1.45; }
+.player-columns { display: grid; grid-template-columns: minmax(0, 1fr) 28px minmax(0, 1fr); gap: 12px; align-items: start; }
+.player-group { display: flex; flex-direction: column; gap: 7px; max-height: 340px; overflow-y: auto; }
+.transfer-direction { align-self: center; color: var(--primary); font-size: 22px; text-align: center; }
+.task-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.task-actions > span { color: var(--text-mid2); font-size: 12px; }
+.empty-state { padding: 16px; border: 1px dashed var(--glass-border); border-radius: 8px; color: var(--text-mid2); font-size: 13px; }
+.identity-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; max-width: 680px; }
+.identity-summary > div { display: flex; flex-direction: column; gap: 4px; padding: 12px 14px; border-left: 3px solid var(--primary); background: rgba(255, 255, 255, 0.42); }
+.identity-summary span { color: var(--text-mid2); font-size: 11px; }
+.identity-summary strong { color: var(--text-hi); font-size: 14px; }
+.identity-summary p { grid-column: 1 / -1; color: var(--red-soft); font-size: 12px; }
+.operation-status { border-color: rgba(75, 120, 150, 0.34); color: var(--palwarm-state-info); }
+.operation-status > div { display: flex; flex-direction: column; gap: 3px; }
+.operation-status span { font-size: 12px; }
+.status-spinner { width: 16px; height: 16px; border: 2px solid rgba(75, 120, 150, 0.24); border-top-color: var(--palwarm-state-info); border-radius: 50%; animation: spin .8s linear infinite; }
+.result-panel { justify-content: space-between; border-color: rgba(79, 138, 107, 0.36); background: var(--green-bg); }
+.result-panel > div:first-child { min-width: 0; }
+.result-panel strong { color: var(--green); }
+.result-panel p { margin-top: 4px; line-height: 1.5; }
+.result-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .status-spinner { animation: none; } }
+@media (max-width: 720px) {
+  .page-head,
+  .task-head,
+  .result-panel { align-items: stretch; flex-direction: column; }
+  .friend-entry { margin-left: 0; }
+  .field-grid,
+  .choice-group,
+  .identity-summary { grid-template-columns: 1fr; }
+  .choice-group legend,
+  .identity-summary p { grid-column: 1; }
+  .player-columns { grid-template-columns: 1fr; }
+  .transfer-direction { transform: rotate(90deg); }
+  .task-actions .btn { flex: 1 1 auto; justify-content: center; }
+  .result-actions { justify-content: stretch; }
+  .result-actions .btn { flex: 1 1 160px; justify-content: center; }
 }
 </style>

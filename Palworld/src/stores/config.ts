@@ -28,13 +28,13 @@ export const useConfigStore = defineStore('config', () => {
     dirty.value.clear()
   }
 
-  // 应用预设合并结果后，刷新原始快照与 dirty 状态
+  // 预设只更新编辑态；用户仍须明确保存后才写入服务器配置。
   async function applyPreset(name: string) {
     const merged = await api.config.applyPreset(name, config.value)
     config.value = merged
-    // 预设视为新的"原始值"，避免整页全橙
-    originalConfig.value = { ...merged }
-    dirty.value.clear()
+    dirty.value = new Set(
+      Object.keys(merged).filter((key) => originalConfig.value[key] !== merged[key]),
+    )
   }
 
   // 从备份恢复后，重新加载配置（调用方负责触发 Rust 端 restore_config_backup）

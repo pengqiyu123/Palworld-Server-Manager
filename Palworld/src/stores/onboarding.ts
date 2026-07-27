@@ -30,23 +30,21 @@ export const useOnboardingStore = defineStore('onboarding', () => {
       ? { status: 'pass' }
       : { status: 'idle' }
 
-    // S2 · 配置就绪（RCONEnabled / RESTAPIEnabled / AdminPassword）
+    // S2 · 配置就绪（RESTAPIEnabled / AdminPassword）
     let s2: OnboardingStepState
     if (!cfgLoaded) {
       s2 = { status: 'idle' }
     } else {
-      const rcon =
-        (cfg['RCONEnabled'] ?? '').toString().trim().toLowerCase() === 'true'
       const rest =
         (cfg['RESTAPIEnabled'] ?? '').toString().trim().toLowerCase() === 'true'
       const pw = (cfg['AdminPassword'] ?? '').toString().trim()
       s2 =
-        rcon && rest && pw
+        rest && pw
           ? { status: 'pass' }
           : {
               status: 'fail',
               reason:
-                '配置不完整：需 RCONEnabled=True、RESTAPIEnabled=True、AdminPassword 非空',
+                '配置不完整：需 RESTAPIEnabled=True、AdminPassword 非空',
             }
     }
 
@@ -56,11 +54,9 @@ export const useOnboardingStore = defineStore('onboarding', () => {
         ? { status: 'pass' }
         : { status: 'idle' }
 
-    // S4 · 防火墙放行（8211 / 25575 / 8212）
+    // S4 · 游戏端口放行。REST 只在本机访问，不应公开管理端口。
     const s4: OnboardingStepState =
-      networkStore.firewall.port_8211_open &&
-      networkStore.firewall.port_25575_open &&
-      networkStore.firewall.port_8212_open
+      networkStore.firewall.port_8211_open
         ? { status: 'pass' }
         : { status: 'idle' }
 

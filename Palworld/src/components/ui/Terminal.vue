@@ -1,6 +1,6 @@
 <template>
   <div class="terminal">
-    <div class="t-bar">RCON 终端输出 · 实时日志</div>
+    <div class="t-bar">服务器管理响应 · 实时记录</div>
     <div class="t-body" ref="bodyRef">
       <div v-for="(line, i) in lines" :key="i" :class="'log-' + line.kind">{{ line.text }}</div>
     </div>

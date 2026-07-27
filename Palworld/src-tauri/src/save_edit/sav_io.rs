@@ -9,24 +9,30 @@
 //!    - `[12..]`   压缩数据
 //! 2. 解压：CNK 单层 zlib；PLZ 双层 zlib；PLM = Oodle(Kraken) → 经 `oodle` 薄封装调
 //!    `oozextract`(MIT) 解码。写回统一降级为 PLZ(zlib)（R11 已修订：Oodle 现已支持）。
-//! 3. 解析：用 `gvas` crate（GameVersion::Palworld）原生解析，无 Python 运行时（Q5）。
-//! 4. UID 交换核心：直接对解压后的 GVAS 原始字节做 16 字节 GUID 全局替换
-//!    （`replace_guid_bytes`）。GUID 在 GVAS 中以 16 原始字节存储，无论出现在顶层
-//!    属性还是嵌套 RawData 二进制块中，字节序列都一致，故该做法既简洁又稳健，
-//!    且天然覆盖 Players / Level / _dps 以及公会、角色 RawData 中的全部引用。
+//! 3. 解析：用 `gvas` crate 原生解析，无 Python 运行时（Q5）。
+//!    注意 `SavFile::raw` 是已剥除 `.sav` 头部、仅含 GVAS 流本身的解压字节，
+//!    因此 `parse()` 必须用 `GameVersion::Default`（纯 GVAS 读取器）；
+//!    `GameVersion::Palworld` 期望完整 `.sav` 包装（8 字节长度 + PlZ 魔法 + 1 字节压缩枚举），
+//!    用于 `SavFile::raw` 会发生 magic 断言失败。写回时由 `SavFile::save()` 重新加 `.sav` 头。
+//! 4. UID 交换只改写 GVAS 的 `Guid` 类型属性。不能在原始字节中盲搜 UID：单机主机
+//!    UID 含大量零字节，会误命中长度、填充和其它非 GUID 数据。RawData 必须按其字段
+//!    格式单独解析，并在解析失败时中止操作。
 
-use std::io::{Cursor, Read};
+use std::collections::HashMap;
+use std::io::{Cursor, Read, Write};
 use std::path::Path;
 
 use flate2::read::{ZlibDecoder, ZlibEncoder};
 use flate2::Compression;
+use gvas::cursor_ext::{ReadExt, WriteExt};
 use gvas::error::Error as GvasError;
 use gvas::game_version::GameVersion;
 use gvas::properties::array_property::ArrayProperty;
 use gvas::properties::int_property::IntProperty;
+use gvas::properties::map_property::MapProperty;
 use gvas::properties::str_property::StrProperty;
 use gvas::properties::struct_property::StructPropertyValue;
-use gvas::properties::Property;
+use gvas::properties::{Property, PropertyOptions, PropertyTrait};
 use gvas::types::map::HashableIndexMap;
 use gvas::types::Guid;
 use gvas::GvasFile;
@@ -82,16 +88,36 @@ pub struct SavFile {
 impl SavFile {
     /// 从磁盘读取并解压 `.sav`。
     pub fn load(path: &Path) -> Result<SavFile, String> {
-        let bytes = std::fs::read(path)
-            .map_err(|e| format!("读取 {} 失败: {}", path.display(), e))?;
-        let (raw, compression) = decode_sav(&bytes)?;
+        let bytes =
+            std::fs::read(path).map_err(|e| format!("读取 {} 失败: {}", path.display(), e))?;
+        Self::from_bytes(&bytes)
+    }
+
+    /// 从完整 `.sav` 字节构造存档，用于落盘前验证候选数据。
+    pub fn from_bytes(bytes: &[u8]) -> Result<SavFile, String> {
+        let (raw, compression) = decode_sav(bytes)?;
         Ok(SavFile { raw, compression })
     }
 
     /// 解析为 `GvasFile`（用于字段级改写）。
+    ///
+    /// `self.raw` 是已解压、已剥除 `.sav` 头部的纯 GVAS 字节流，
+    /// 故使用 `GameVersion::Default`（纯 GVAS 读取器）。
+    /// 若误用 `GameVersion::Palworld`（期望完整 `.sav` 包装），会因 magic
+    /// 断言失败而永远返回 `Err`。
+    ///
+    /// 解析使用 `read_with_hints` 并注入 `palworld_hints()`：Palworld 的真实
+    /// `Level.sav` 在 MapProperty / ArrayProperty 内部的结构体缺少类型自描述信息，
+    /// `gvas` 必须靠 hint 才能正确读取（否则报 `MissingHint`）。`palworld_hints()`
+    /// 收割自同行社区（`PalworldSaveTools::paltypes.PALWORLD_TYPE_HINTS`），覆盖真实
+    /// 存档全部 Map 的 Key/Value 结构体类型，使全量结构化解析 + 无损回写成为可能。
+    ///
+    /// fail-safe：任何 `read_with_hints` 失败都直接 `return Err`，绝不静默产出
+    /// 损坏存档（调用方据此整体失败而非写坏文件）。
     pub fn parse(&self) -> Result<GvasFile, String> {
         let mut cursor = Cursor::new(self.raw.clone());
-        GvasFile::read(&mut cursor, GameVersion::Palworld)
+        let hints = palworld_hints();
+        GvasFile::read_with_hints(&mut cursor, GameVersion::Default, &hints)
             .map_err(|e: GvasError| format!("GVAS 解析失败: {}", e))
     }
 
@@ -106,31 +132,51 @@ impl SavFile {
         })
     }
 
+    /// 生成完整 `.sav` 文件字节，供事务层在正式落盘前校验候选数据。
+    pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
+        // PlM 降级：magic 用 PlZ(50)，数据走双层 zlib（与 CNK/PLZ 同族）。
+        let (write_magic, write_save_type, encode_as) = match self.compression {
+            SavCompression::Plm => (MAGIC_PLZ, 50u8, SavCompression::Plz),
+            other => (other.magic(), other.save_type(), other),
+        };
+
+        // P0-2（R-OODLE-2 根因）：`.sav` 头部 `compressed_len` 必须记录**内层** zlib 流长度，
+        // 与真实 Palworld .sav 格式一致——先 `zlib_compress(raw)` 得 inner，再 `zlib_compress(inner)`
+        // 得 outer；头部写 inner 长度，payload 写 outer。游戏侧据此先解内层、再解外层。
+        // CNK 为单层压缩，inner == outer，无此区别；PLM 降级走 PLZ 双层，同样取 inner 长度。
+        let (payload, inner_compressed_len): (Vec<u8>, u32) = match encode_as {
+            SavCompression::Plz => {
+                let inner = zlib_compress(&self.raw)?;
+                let inner_len = inner.len() as u32;
+                let outer = zlib_compress(&inner)?;
+                (outer, inner_len)
+            }
+            _ => {
+                let c = encode_payload(&self.raw, encode_as)?;
+                let len = c.len() as u32;
+                (c, len)
+            }
+        };
+        let uncompressed_len = self.raw.len() as u32;
+
+        let mut out = Vec::with_capacity(12 + payload.len());
+        out.extend_from_slice(&uncompressed_len.to_le_bytes());
+        out.extend_from_slice(&inner_compressed_len.to_le_bytes());
+        out.extend_from_slice(write_magic);
+        out.push(write_save_type);
+        out.extend_from_slice(&payload);
+
+        Ok(out)
+    }
+
     /// 写回磁盘（按压缩方式重新压缩并加 header）。
     ///
     /// 注意：若 `compression == SavCompression::Plm`，按 R11(修订) **降级写回 PLZ**——
     /// 写 PlZ(50) magic + 双层 zlib 数据（而非 PlM 头包裹 zlib 流，那会是损坏文件）。
     /// 游戏对所有 PLZ 读取并在下次自动存档升级回 PlM，零数据损失。
     pub fn save(&self, path: &Path) -> Result<(), String> {
-        // PlM 降级：magic 用 PlZ(50)，数据走双层 zlib（与 CNK/PLZ 同族）。
-        let (write_magic, write_save_type, encode_as) = match self.compression {
-            SavCompression::Plm => (MAGIC_PLZ, 50u8, SavCompression::Plz),
-            other => (other.magic(), other.save_type(), other),
-        };
-        let compressed = encode_payload(&self.raw, encode_as)?;
-        let uncompressed_len = self.raw.len() as u32;
-        let compressed_len = compressed.len() as u32;
-
-        let mut out = Vec::with_capacity(12 + compressed.len());
-        out.extend_from_slice(&uncompressed_len.to_le_bytes());
-        out.extend_from_slice(&compressed_len.to_le_bytes());
-        out.extend_from_slice(write_magic);
-        out.push(write_save_type);
-        out.extend_from_slice(&compressed);
-
-        std::fs::write(path, &out)
-            .map_err(|e| format!("写入 {} 失败: {}", path.display(), e))?;
-        Ok(())
+        let out = self.to_bytes()?;
+        std::fs::write(path, &out).map_err(|e| format!("写入 {} 失败: {}", path.display(), e))
     }
 
     /// round-trip 校验：解析 → 改写 → 再解析，顶层属性键集合应一致。
@@ -169,17 +215,809 @@ impl SavFile {
             }
         }
     }
+
+    /// 结构化 GUID 替换（安全）：解析 → 仅改写 `Guid` 类型属性 → 重序列化写回。
+    ///
+    /// 与 `replace_guid_bytes`（盲搜 16 字节）的根本区别：本方法**绝不触碰非 GUID 字节**。
+    /// 因此对 `old` 字节序列（如 `000…0001` = `[00×15, 01]`）命中长度/填充字段而导致存档损坏
+    /// 的情形免疫——这是 Phase B 早期盲搜替换在真实 Level.sav 上触发 337GB 分配崩溃的根因。
+    ///
+    /// 仅当解析成功且确实命中 `old` 的 Guid 属性时才重写 `self.raw`；解析失败返回错误，
+    /// 绝不静默产生损坏存档。
+    pub fn replace_guid_structured(
+        &mut self,
+        old: &[u8; 16],
+        new: &[u8; 16],
+    ) -> Result<usize, String> {
+        if old == new {
+            return Ok(0);
+        }
+        let mut gvas = self.parse()?;
+        let n = replace_guid_in_gvas(&mut gvas, old, new);
+        if n > 0 {
+            let new_sav = SavFile::from_gvas(&gvas, self.compression)?;
+            self.raw = new_sav.raw;
+        }
+        Ok(n)
+    }
 }
 
-/// 解析 GUID 字符串为 `Guid`。
-pub fn parse_guid(s: &str) -> Result<Guid, String> {
-    s.parse::<Guid>()
-        .map_err(|e| format!("GUID 解析失败 ({}): {:?}", s, e))
+/// Palworld 帕鲁结构体类型 → `gvas` hint 映射表（供 `SavFile::parse` 的 `read_with_hints`）。
+///
+/// # 来源（老板拍板「借鉴同行、不自己造」）
+/// 收割自同行社区 `PalworldSaveTools`（`reference-projects/PalworldSaveTools-main/.../palsav/
+/// palsav/paltypes.py` 中的 `PALWORLD_TYPE_HINTS`）。每一条 gvas 路径均由对应 PST 路径翻译
+/// 而来，覆盖真实 `Level.sav` 中 `worldSaveData` / `SaveData` 下全部 Map 的 Key / Value
+/// 结构体类型。本表是该解析能力的「类型字典」，不引入任何自造类型名。
+///
+/// # hint 取值语义（对照 `gvas 0.11.0` `struct_property::read_body`）
+/// - `"Guid"`：读取内置 16 字节 GUID。用于**裸 GUID 键**（无 StructProperty 头，如
+///   `GroupSaveDataMap.Key` / `BaseCampSaveData.Key` 等）。若误用其它名走 `read_custom`，
+///   gvas 会把前 4 字节当 FString 长度 → 字节错位 / `Invalid string size`。
+/// - 任意非内置名（此处统一用 `"StructProperty"`）：走 `read_custom`，按 `CustomStruct`
+///   泛型读取自描述结构体（含嵌套字段，递归自描述，无需再 hint）。
+///
+/// # 为什么只 hint Map/Array 的 Key/Value
+/// 嵌套 struct 字段本身由 `read_custom` 递归泛型读取，无需单独 hint；只有 Map/Array 的
+/// 值（及裸 GUID 键）缺失类型信息时才需要 hint。故本表只覆盖各 Map 的 `Key` / `Value`
+/// （及个别 GUID 数组元素），与 `PALWORLD_TYPE_HINTS` 逐条对应。
+///
+/// 翻译规则（PST 点分路径 → gvas 属性栈路径）：
+/// - 根 `worldSaveData` / `SaveData` → `<root>.StructProperty`；
+/// - Map 名 → `.<Map>.MapProperty`；其 `Key` → `.Key.StructProperty`、`Value` → `.Value.StructProperty`；
+/// - Map 值结构若与 Map 同名（如 `MapObjectSaveData`、`DungeonSaveData`、`WorkSaveData`），
+///   gvas 路径把值结构类型名吸收进 `.Value.StructProperty`，不再额外加段；
+/// - 嵌套 struct 字段 → `.<field>.StructProperty`，其内再出现的 Map → `.MapProperty`……
+pub fn palworld_hints() -> HashMap<String, String> {
+    let mut hints: HashMap<String, String> = HashMap::new();
+    let s = "StructProperty".to_string();
+    let g = "Guid".to_string();
+
+    // ---- CharacterContainerSaveData ----
+    // hint from palworld-save-tools: src/palsav/palsav/paltypes.py PALWORLD_TYPE_HINTS
+    hints.insert(
+        "worldSaveData.StructProperty.CharacterContainerSaveData.MapProperty.Key.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    hints.insert(
+        "worldSaveData.StructProperty.CharacterContainerSaveData.MapProperty.Value.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    // ---- CharacterSaveParameterMap ----
+    // hint from palworld-save-tools: src/palsav/palsav/paltypes.py PALWORLD_TYPE_HINTS
+    hints.insert(
+        "worldSaveData.StructProperty.CharacterSaveParameterMap.MapProperty.Key.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    hints.insert(
+        "worldSaveData.StructProperty.CharacterSaveParameterMap.MapProperty.Value.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    // ---- FoliageGridSaveDataMap ----
+    // hint from palworld-save-tools: src/palsav/palsav/paltypes.py PALWORLD_TYPE_HINTS
+    hints.insert(
+        "worldSaveData.StructProperty.FoliageGridSaveDataMap.MapProperty.Key.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    hints.insert(
+        "worldSaveData.StructProperty.FoliageGridSaveDataMap.MapProperty.Value.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    hints.insert(
+        "worldSaveData.StructProperty.FoliageGridSaveDataMap.MapProperty.Value.StructProperty.ModelMap.MapProperty.Value.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    hints.insert(
+        "worldSaveData.StructProperty.FoliageGridSaveDataMap.MapProperty.Value.StructProperty.ModelMap.MapProperty.Value.StructProperty.InstanceDataMap.MapProperty.Key.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    hints.insert(
+        "worldSaveData.StructProperty.FoliageGridSaveDataMap.MapProperty.Value.StructProperty.ModelMap.MapProperty.Value.StructProperty.InstanceDataMap.MapProperty.Value.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    // ---- ItemContainerSaveData ----
+    // hint from palworld-save-tools: src/palsav/palsav/paltypes.py PALWORLD_TYPE_HINTS
+    hints.insert(
+        "worldSaveData.StructProperty.ItemContainerSaveData.MapProperty.Key.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    hints.insert(
+        "worldSaveData.StructProperty.ItemContainerSaveData.MapProperty.Value.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    // ---- MapObjectSaveData（值结构 MapObjectSaveData 同名，gvas 路径吸收为 Value.StructProperty）----
+    // hint from palworld-save-tools: src/palsav/palsav/paltypes.py PALWORLD_TYPE_HINTS
+    hints.insert(
+        "worldSaveData.StructProperty.MapObjectSaveData.MapProperty.Value.StructProperty.ConcreteModel.StructProperty.ModuleMap.MapProperty.Value.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    hints.insert(
+        "worldSaveData.StructProperty.MapObjectSaveData.MapProperty.Value.StructProperty.Model.StructProperty.EffectMap.MapProperty.Value.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    // Palworld 1.0 世界同时把部分 MapObjectSaveData 写作 ArrayProperty；
+    // 这是 PalworldSaveTools 的同一类型提示在 gvas 属性栈中的容器变体。
+    hints.insert(
+        "worldSaveData.StructProperty.MapObjectSaveData.ArrayProperty.ConcreteModel.StructProperty.ModuleMap.MapProperty.Value.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    hints.insert(
+        "worldSaveData.StructProperty.MapObjectSaveData.ArrayProperty.Model.StructProperty.EffectMap.MapProperty.Value.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    // ---- MapObjectSpawnerInStageSaveData ----
+    // hint from palworld-save-tools: src/palsav/palsav/paltypes.py PALWORLD_TYPE_HINTS
+    hints.insert(
+        "worldSaveData.StructProperty.MapObjectSpawnerInStageSaveData.MapProperty.Key.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    hints.insert(
+        "worldSaveData.StructProperty.MapObjectSpawnerInStageSaveData.MapProperty.Value.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    hints.insert(
+        "worldSaveData.StructProperty.MapObjectSpawnerInStageSaveData.MapProperty.Value.StructProperty.SpawnerDataMapByLevelObjectInstanceId.MapProperty.Key.StructProperty"
+            .to_string(),
+        g.clone(),
+    );
+    hints.insert(
+        "worldSaveData.StructProperty.MapObjectSpawnerInStageSaveData.MapProperty.Value.StructProperty.SpawnerDataMapByLevelObjectInstanceId.MapProperty.Value.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    hints.insert(
+        "worldSaveData.StructProperty.MapObjectSpawnerInStageSaveData.MapProperty.Value.StructProperty.SpawnerDataMapByLevelObjectInstanceId.MapProperty.Value.StructProperty.ItemMap.MapProperty.Value.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    // ---- WorkSaveData（值结构 WorkSaveData 同名）----
+    // hint from palworld-save-tools: src/palsav/palsav/paltypes.py PALWORLD_TYPE_HINTS
+    hints.insert(
+        "worldSaveData.StructProperty.WorkSaveData.MapProperty.Value.StructProperty.WorkAssignMap.MapProperty.Value.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    hints.insert(
+        "worldSaveData.StructProperty.WorkSaveData.ArrayProperty.WorkAssignMap.MapProperty.Value.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    // ---- BaseCampSaveData ----
+    // hint from palworld-save-tools: src/palsav/palsav/paltypes.py PALWORLD_TYPE_HINTS
+    hints.insert(
+        "worldSaveData.StructProperty.BaseCampSaveData.MapProperty.Key.StructProperty".to_string(),
+        g.clone(),
+    );
+    hints.insert(
+        "worldSaveData.StructProperty.BaseCampSaveData.MapProperty.Value.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    hints.insert(
+        "worldSaveData.StructProperty.BaseCampSaveData.MapProperty.Value.StructProperty.ModuleMap.MapProperty.Value.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    // ---- GroupSaveDataMap（键为裸 GUID）----
+    // hint from palworld-save-tools: src/palsav/palsav/paltypes.py PALWORLD_TYPE_HINTS
+    hints.insert(
+        "worldSaveData.StructProperty.GroupSaveDataMap.MapProperty.Key.StructProperty".to_string(),
+        g.clone(),
+    );
+    hints.insert(
+        "worldSaveData.StructProperty.GroupSaveDataMap.MapProperty.Value.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    // ---- EnemyCampSaveData ----
+    // hint from palworld-save-tools: src/palsav/palsav/paltypes.py PALWORLD_TYPE_HINTS
+    hints.insert(
+        "worldSaveData.StructProperty.EnemyCampSaveData.MapProperty.Value.StructProperty.EnemyCampStatusMap.MapProperty.Value.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    hints.insert(
+        "worldSaveData.StructProperty.EnemyCampSaveData.MapProperty.Value.StructProperty.EnemyCampStatusMap.MapProperty.Value.StructProperty.TreasureBoxInfoMapBySpawnerName.MapProperty.Value.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    hints.insert(
+        "worldSaveData.StructProperty.EnemyCampSaveData.StructProperty.EnemyCampStatusMap.MapProperty.Value.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    // ---- DungeonSaveData（值结构 DungeonSaveData 同名；内含 MapObjectSaveData 同名值结构）----
+    // hint from palworld-save-tools: src/palsav/palsav/paltypes.py PALWORLD_TYPE_HINTS
+    hints.insert(
+        "worldSaveData.StructProperty.DungeonSaveData.MapProperty.Value.StructProperty.MapObjectSaveData.MapProperty.Value.StructProperty.Model.StructProperty.EffectMap.MapProperty.Value.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    hints.insert(
+        "worldSaveData.StructProperty.DungeonSaveData.MapProperty.Value.StructProperty.MapObjectSaveData.MapProperty.Value.StructProperty.ConcreteModel.StructProperty.ModuleMap.MapProperty.Value.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    hints.insert(
+        "worldSaveData.StructProperty.DungeonSaveData.MapProperty.Value.StructProperty.RewardSaveDataMap.MapProperty.Key.StructProperty"
+            .to_string(),
+        g.clone(),
+    );
+    hints.insert(
+        "worldSaveData.StructProperty.DungeonSaveData.MapProperty.Value.StructProperty.RewardSaveDataMap.MapProperty.Value.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    // ---- InvaderSaveData（键为裸 GUID）----
+    // hint from palworld-save-tools: src/palsav/palsav/paltypes.py PALWORLD_TYPE_HINTS
+    hints.insert(
+        "worldSaveData.StructProperty.InvaderSaveData.MapProperty.Key.StructProperty".to_string(),
+        g.clone(),
+    );
+    hints.insert(
+        "worldSaveData.StructProperty.InvaderSaveData.MapProperty.Value.StructProperty".to_string(),
+        s.clone(),
+    );
+    // ---- OilrigSaveData ----
+    // hint from palworld-save-tools: src/palsav/palsav/paltypes.py PALWORLD_TYPE_HINTS
+    hints.insert(
+        "worldSaveData.StructProperty.OilrigSaveData.MapProperty.Value.StructProperty.OilrigMap.MapProperty.Value.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    hints.insert(
+        "worldSaveData.StructProperty.OilrigSaveData.StructProperty.OilrigMap.MapProperty.Value.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    // ---- SupplySaveData ----
+    // hint from palworld-save-tools: src/palsav/palsav/paltypes.py PALWORLD_TYPE_HINTS
+    hints.insert(
+        "worldSaveData.StructProperty.SupplySaveData.MapProperty.Value.StructProperty.SupplyInfos.MapProperty.Key.StructProperty"
+            .to_string(),
+        g.clone(),
+    );
+    hints.insert(
+        "worldSaveData.StructProperty.SupplySaveData.MapProperty.Value.StructProperty.SupplyInfos.MapProperty.Value.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    // ---- GuildExtraSaveDataMap（键为裸 GUID）----
+    // hint from palworld-save-tools: src/palsav/palsav/paltypes.py PALWORLD_TYPE_HINTS
+    hints.insert(
+        "worldSaveData.StructProperty.GuildExtraSaveDataMap.MapProperty.Key.StructProperty"
+            .to_string(),
+        g.clone(),
+    );
+    hints.insert(
+        "worldSaveData.StructProperty.GuildExtraSaveDataMap.MapProperty.Value.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    // ---- InvaderDeclarationSaveData（ValidatedStartPointIds 为 GUID 数组元素）----
+    // hint from palworld-save-tools: src/palsav/palsav/paltypes.py PALWORLD_TYPE_HINTS
+    hints.insert(
+        "worldSaveData.StructProperty.InvaderDeclarationSaveData.StructProperty.ValidatedStartPointIds.StructProperty"
+            .to_string(),
+        g.clone(),
+    );
+    // gvas 0.11 includes the SetProperty container in the concrete read path.
+    hints.insert(
+        "worldSaveData.StructProperty.InvaderDeclarationSaveData.StructProperty.ValidatedStartPointIds.SetProperty.StructProperty"
+            .to_string(),
+        g.clone(),
+    );
+    // ---- SaveData.Local_MaxFriendshipPalIds ----
+    // hint from palworld-save-tools: src/palsav/palsav/paltypes.py PALWORLD_TYPE_HINTS
+    hints.insert(
+        "SaveData.StructProperty.Local_MaxFriendshipPalIds.MapProperty.Key.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+    hints.insert(
+        "SaveData.StructProperty.Local_MaxFriendshipPalIds.MapProperty.Value.StructProperty"
+            .to_string(),
+        s.clone(),
+    );
+
+    hints
 }
 
-/// 取某 GUID 在存档中的 16 字节（磁盘序，与 Display 互逆）。
+/// 遍历解析后的 `GvasFile` 属性树，把等于 `old` 的 `Guid` 类型属性值改写为 `new`。
+/// 返回被改写的 GUID 数。非 GUID 字节（长度/填充/原始数据块中的巧合序列）一律不动。
+pub fn replace_guid_in_gvas(gvas: &mut GvasFile, old: &[u8; 16], new: &[u8; 16]) -> usize {
+    let mut n = 0usize;
+    for (_k, p) in gvas.properties.iter_mut() {
+        n += replace_guid_in_property(p, old, new);
+    }
+    n
+}
+
+/// 在完整 GVAS 属性树中安全交换两种 GUID。只处理类型化 `Guid` 属性，绝不扫描原始字节。
+#[allow(dead_code)] // Diagnostic API retained while V4 uses directional identity mapping.
+pub fn swap_guids_in_gvas(
+    gvas: &mut GvasFile,
+    old: &[u8; 16],
+    new: &[u8; 16],
+) -> Result<usize, String> {
+    if old == new {
+        return Ok(0);
+    }
+    let changed = count_guid_in_gvas(gvas, old) + count_guid_in_gvas(gvas, new);
+    let temp = find_unused_typed_guid(
+        |candidate| count_guid_in_gvas(gvas, candidate) == 0,
+        old,
+        new,
+    )?;
+    replace_guid_in_gvas(gvas, old, &temp);
+    replace_guid_in_gvas(gvas, new, old);
+    replace_guid_in_gvas(gvas, &temp, new);
+    Ok(changed)
+}
+
+const OWNER_UID_FIELDS: &[&str] = &[
+    "OwnerPlayerUId",
+    "owner_player_uid",
+    "build_player_uid",
+    "private_lock_player_uid",
+];
+
+fn is_owner_uid_field(name: &str) -> bool {
+    OWNER_UID_FIELDS.contains(&name)
+}
+
+fn count_owner_guids_in_property(name: &str, property: &Property, target: &[u8; 16]) -> usize {
+    if is_owner_uid_field(name) {
+        return count_guid_in_property(property, target);
+    }
+    match property {
+        Property::StructProperty(value) => match &value.value {
+            StructPropertyValue::CustomStruct(fields) => fields
+                .iter()
+                .flat_map(|(name, values)| values.iter().map(move |value| (name, value)))
+                .map(|(name, value)| count_owner_guids_in_property(name, value, target))
+                .sum(),
+            _ => 0,
+        },
+        Property::StructPropertyValue(StructPropertyValue::CustomStruct(fields)) => fields
+            .iter()
+            .flat_map(|(name, values)| values.iter().map(move |value| (name, value)))
+            .map(|(name, value)| count_owner_guids_in_property(name, value, target))
+            .sum(),
+        Property::ArrayProperty(ArrayProperty::Structs { structs, .. }) => structs
+            .iter()
+            .map(|value| match value {
+                StructPropertyValue::CustomStruct(fields) => fields
+                    .iter()
+                    .flat_map(|(name, values)| values.iter().map(move |value| (name, value)))
+                    .map(|(name, value)| count_owner_guids_in_property(name, value, target))
+                    .sum(),
+                _ => 0,
+            })
+            .sum(),
+        Property::ArrayProperty(ArrayProperty::Properties { properties, .. }) => properties
+            .iter()
+            .map(|value| count_owner_guids_in_property("", value, target))
+            .sum(),
+        Property::MapProperty(MapProperty::Properties { value, .. }) => value
+            .iter()
+            .map(|(key, value)| {
+                count_owner_guids_in_property("", key, target)
+                    + count_owner_guids_in_property("", value, target)
+            })
+            .sum(),
+        Property::SetProperty(value) => value
+            .properties
+            .iter()
+            .map(|value| count_owner_guids_in_property("", value, target))
+            .sum(),
+        _ => 0,
+    }
+}
+
+fn replace_owner_guids_in_property(
+    name: &str,
+    property: &mut Property,
+    old: &[u8; 16],
+    new: &[u8; 16],
+) -> usize {
+    if is_owner_uid_field(name) {
+        return replace_guid_in_property(property, old, new);
+    }
+    match property {
+        Property::StructProperty(value) => match &mut value.value {
+            StructPropertyValue::CustomStruct(fields) => fields
+                .iter_mut()
+                .flat_map(|(name, values)| {
+                    values.iter_mut().map(move |value| (name.as_str(), value))
+                })
+                .map(|(name, value)| replace_owner_guids_in_property(name, value, old, new))
+                .sum(),
+            _ => 0,
+        },
+        Property::StructPropertyValue(StructPropertyValue::CustomStruct(fields)) => fields
+            .iter_mut()
+            .flat_map(|(name, values)| values.iter_mut().map(move |value| (name.as_str(), value)))
+            .map(|(name, value)| replace_owner_guids_in_property(name, value, old, new))
+            .sum(),
+        Property::ArrayProperty(ArrayProperty::Structs { structs, .. }) => structs
+            .iter_mut()
+            .map(|value| match value {
+                StructPropertyValue::CustomStruct(fields) => fields
+                    .iter_mut()
+                    .flat_map(|(name, values)| {
+                        values.iter_mut().map(move |value| (name.as_str(), value))
+                    })
+                    .map(|(name, value)| replace_owner_guids_in_property(name, value, old, new))
+                    .sum(),
+                _ => 0,
+            })
+            .sum(),
+        Property::ArrayProperty(ArrayProperty::Properties { properties, .. }) => properties
+            .iter_mut()
+            .map(|value| replace_owner_guids_in_property("", value, old, new))
+            .sum(),
+        Property::MapProperty(MapProperty::Properties { value, .. }) => value
+            .0
+            .iter_mut()
+            .map(|(_, value)| replace_owner_guids_in_property("", value, old, new))
+            .sum(),
+        Property::SetProperty(value) => value
+            .properties
+            .iter_mut()
+            .map(|value| replace_owner_guids_in_property("", value, old, new))
+            .sum(),
+        _ => 0,
+    }
+}
+
+pub fn swap_owner_guids_in_gvas(
+    gvas: &mut GvasFile,
+    old: &[u8; 16],
+    new: &[u8; 16],
+) -> Result<usize, String> {
+    let count_for = |target: &[u8; 16]| {
+        gvas.properties
+            .iter()
+            .map(|(name, property)| count_owner_guids_in_property(name, property, target))
+            .sum::<usize>()
+    };
+    let changed = count_for(old) + count_for(new);
+    if changed == 0 {
+        return Ok(0);
+    }
+    let temp = find_unused_typed_guid(|candidate| count_for(candidate) == 0, old, new)?;
+    for (name, property) in gvas.properties.iter_mut() {
+        replace_owner_guids_in_property(name, property, old, &temp);
+        replace_owner_guids_in_property(name, property, new, old);
+        replace_owner_guids_in_property(name, property, &temp, new);
+    }
+    Ok(changed)
+}
+
+/// 只交换角色 RawData 中明确表示所有权的 GUID，保留 CSPM 稳定身份和自定义尾部字节。
+pub fn swap_owner_guids_in_character_property_stream(
+    bytes: &[u8],
+    custom_versions: &HashableIndexMap<Guid, u32>,
+    old: &[u8; 16],
+    new: &[u8; 16],
+) -> Result<(Vec<u8>, usize), String> {
+    if old == new {
+        return Ok((bytes.to_vec(), 0));
+    }
+
+    let mut reader = Cursor::new(bytes);
+    let hints = HashMap::new();
+    let mut stack = Vec::new();
+    let mut options = PropertyOptions {
+        hints: &hints,
+        properties_stack: &mut stack,
+        custom_versions,
+    };
+    let mut properties = Vec::<(String, Property)>::new();
+    loop {
+        let name = reader
+            .read_string()
+            .map_err(|e| format!("读取 RawData 属性名失败: {e}"))?;
+        if name == "None" {
+            break;
+        }
+        let property_type = reader
+            .read_string()
+            .map_err(|e| format!("读取 RawData 属性类型失败 ({name}): {e}"))?;
+        let property = Property::new(&mut reader, &property_type, true, &mut options, None)
+            .map_err(|e| format!("解析 RawData 属性失败 ({name}/{property_type}): {e}"))?;
+        properties.push((name, property));
+    }
+    let tail_start = reader.position() as usize;
+    if tail_start > bytes.len() {
+        return Err("RawData 属性流尾部位置越界".to_string());
+    }
+
+    let count_for = |target: &[u8; 16]| {
+        properties
+            .iter()
+            .map(|(name, property)| count_owner_guids_in_property(name, property, target))
+            .sum::<usize>()
+    };
+    let changed = count_for(old) + count_for(new);
+    if changed == 0 {
+        return Ok((bytes.to_vec(), 0));
+    }
+    let temp = find_unused_typed_guid(|candidate| count_for(candidate) == 0, old, new)?;
+    for (name, property) in properties.iter_mut() {
+        replace_owner_guids_in_property(name, property, old, &temp);
+        replace_owner_guids_in_property(name, property, new, old);
+        replace_owner_guids_in_property(name, property, &temp, new);
+    }
+
+    let mut writer = Cursor::new(Vec::with_capacity(bytes.len()));
+    let empty_hints = HashMap::new();
+    let mut write_stack = Vec::new();
+    let mut write_options = PropertyOptions {
+        hints: &empty_hints,
+        properties_stack: &mut write_stack,
+        custom_versions,
+    };
+    for (name, property) in &properties {
+        writer
+            .write_string(name)
+            .map_err(|e| format!("写入 RawData 属性名失败 ({name}): {e}"))?;
+        property
+            .write(&mut writer, true, &mut write_options)
+            .map_err(|e| format!("写入 RawData 属性失败 ({name}): {e}"))?;
+    }
+    writer
+        .write_string("None")
+        .map_err(|e| format!("写入 RawData 终止符失败: {e}"))?;
+    writer
+        .write_all(&bytes[tail_start..])
+        .map_err(|e| format!("写入 RawData 尾部失败: {e}"))?;
+    Ok((writer.into_inner(), changed))
+}
+
+fn find_unused_typed_guid<F>(
+    mut is_unused: F,
+    old: &[u8; 16],
+    new: &[u8; 16],
+) -> Result<[u8; 16], String>
+where
+    F: FnMut(&[u8; 16]) -> bool,
+{
+    for marker in 1u16..=u8::MAX as u16 {
+        let mut candidate = *old;
+        candidate[0] ^= 0xA5;
+        candidate[7] ^= marker as u8;
+        candidate[15] ^= 0x5A;
+        if candidate != *old && candidate != *new && is_unused(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    Err("无法生成安全的临时 GUID，已取消身份交换".to_string())
+}
+
+fn replace_guid_in_property(p: &mut Property, old: &[u8; 16], new: &[u8; 16]) -> usize {
+    match p {
+        Property::StructProperty(s) => {
+            let mut n = 0;
+            if s.type_name == "Guid" {
+                if let StructPropertyValue::Guid(g) = &mut s.value {
+                    if g.to_u8() == *old {
+                        *g = Guid::from_u8(*new);
+                        n += 1;
+                    }
+                }
+            } else if let StructPropertyValue::CustomStruct(map) = &mut s.value {
+                n += replace_guid_in_custom(map, old, new);
+            }
+            n
+        }
+        Property::StructPropertyValue(spv) => replace_guid_in_spv(spv, old, new),
+        Property::ArrayProperty(ArrayProperty::Structs { structs, .. }) => structs
+            .iter_mut()
+            .map(|spv| replace_guid_in_spv(spv, old, new))
+            .sum(),
+        Property::ArrayProperty(ArrayProperty::Properties { properties, .. }) => properties
+            .iter_mut()
+            .map(|p| replace_guid_in_property(p, old, new))
+            .sum(),
+        Property::MapProperty(MapProperty::Properties { value, .. }) => {
+            let mut n = 0;
+            // 值：直接可变遍历。
+            for (_k, v) in value.0.iter_mut() {
+                n += replace_guid_in_property(v, old, new);
+            }
+            // 键：IndexMap 的 iter_mut 只给不可变键，需先摘除再改键重插（顺序会移到末尾，功能等价）。
+            let mut i = 0;
+            while i < value.0.len() {
+                let key_has = value
+                    .0
+                    .get_index(i)
+                    .map(|(k, _)| count_guid_in_property(k, old) > 0)
+                    .unwrap_or(false);
+                if key_has {
+                    let (k, v) = value.0.shift_remove_index(i).unwrap();
+                    let mut new_k = k;
+                    let replaced = replace_guid_in_property(&mut new_k, old, new);
+                    value.0.insert(new_k, v);
+                    n += replaced;
+                    // 不递增 i：原 i+1 元素已下移填补空位
+                } else {
+                    i += 1;
+                }
+            }
+            n
+        }
+        Property::SetProperty(set) => set
+            .properties
+            .iter_mut()
+            .map(|p| replace_guid_in_property(p, old, new))
+            .sum(),
+        _ => 0,
+    }
+}
+
+fn replace_guid_in_spv(spv: &mut StructPropertyValue, old: &[u8; 16], new: &[u8; 16]) -> usize {
+    match spv {
+        StructPropertyValue::Guid(g) => {
+            if g.to_u8() == *old {
+                *g = Guid::from_u8(*new);
+                1
+            } else {
+                0
+            }
+        }
+        StructPropertyValue::CustomStruct(map) => replace_guid_in_custom(map, old, new),
+        _ => 0,
+    }
+}
+
+fn replace_guid_in_custom(
+    map: &mut HashableIndexMap<String, Vec<Property>>,
+    old: &[u8; 16],
+    new: &[u8; 16],
+) -> usize {
+    let mut n = 0;
+    for (_k, vec) in map.iter_mut() {
+        for p in vec.iter_mut() {
+            n += replace_guid_in_property(p, old, new);
+        }
+    }
+    n
+}
+
+/// 统计解析后的 `GvasFile` 中等于 `target` 的 `Guid` 类型属性数（诊断 / 测试断言用）。
+#[allow(dead_code)] // Paired with the diagnostic typed-GUID swap API.
+pub fn count_guid_in_gvas(gvas: &GvasFile, target: &[u8; 16]) -> usize {
+    let mut n = 0usize;
+    for (_k, p) in gvas.properties.iter() {
+        n += count_guid_in_property(p, target);
+    }
+    n
+}
+
+fn count_guid_in_property(p: &Property, target: &[u8; 16]) -> usize {
+    match p {
+        Property::StructProperty(s) => {
+            let mut n = 0;
+            if s.type_name == "Guid" {
+                if let StructPropertyValue::Guid(g) = &s.value {
+                    if g.to_u8() == *target {
+                        n += 1;
+                    }
+                }
+            } else if let StructPropertyValue::CustomStruct(map) = &s.value {
+                n += count_guid_in_custom(map, target);
+            }
+            n
+        }
+        Property::StructPropertyValue(spv) => count_guid_in_spv(spv, target),
+        Property::ArrayProperty(ArrayProperty::Structs { structs, .. }) => structs
+            .iter()
+            .map(|spv| count_guid_in_spv(spv, target))
+            .sum(),
+        Property::ArrayProperty(ArrayProperty::Properties { properties, .. }) => properties
+            .iter()
+            .map(|p| count_guid_in_property(p, target))
+            .sum(),
+        Property::MapProperty(MapProperty::Properties { value, .. }) => {
+            let mut n = 0;
+            for (k, v) in value.iter() {
+                n += count_guid_in_property(k, target);
+                n += count_guid_in_property(v, target);
+            }
+            n
+        }
+        Property::SetProperty(set) => set
+            .properties
+            .iter()
+            .map(|p| count_guid_in_property(p, target))
+            .sum(),
+        _ => 0,
+    }
+}
+
+fn count_guid_in_spv(spv: &StructPropertyValue, target: &[u8; 16]) -> usize {
+    match spv {
+        StructPropertyValue::Guid(g) => {
+            if g.to_u8() == *target {
+                1
+            } else {
+                0
+            }
+        }
+        StructPropertyValue::CustomStruct(map) => count_guid_in_custom(map, target),
+        _ => 0,
+    }
+}
+
+fn count_guid_in_custom(map: &HashableIndexMap<String, Vec<Property>>, target: &[u8; 16]) -> usize {
+    let mut n = 0;
+    for (_k, vec) in map.iter() {
+        for p in vec.iter() {
+            n += count_guid_in_property(p, target);
+        }
+    }
+    n
+}
+
+/// 将 Palworld 的文本 UID 转为存档内 FGuid 的 16 个原始字节。
+///
+/// Palworld 的 32 位十六进制 UID 是四个 `u32` 的显示值；GVAS 将每个
+/// `u32` 分别按小端写入。它不是 UUID crate 的网络字节序，不能直接使用
+/// `Guid::from_str(...).to_u8()`。
 pub fn guid_bytes(s: &str) -> Result<[u8; 16], String> {
-    Ok(parse_guid(s)?.to_u8())
+    let normalized: String = s
+        .chars()
+        .filter(|c| *c != '-' && !c.is_ascii_whitespace())
+        .collect();
+    if normalized.len() != 32 || !normalized.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!("GUID 格式无效（需要 32 位十六进制）: {}", s));
+    }
+
+    let mut raw = [0u8; 16];
+    for index in 0..4 {
+        let text_start = index * 8;
+        let word = u32::from_str_radix(&normalized[text_start..text_start + 8], 16)
+            .map_err(|e| format!("GUID 解析失败 ({}): {}", s, e))?;
+        let raw_start = index * 4;
+        raw[raw_start..raw_start + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    Ok(raw)
+}
+
+/// 解析 Palworld 文本 UID 为 gvas 的 `Guid`，供需要 `Guid` 值的结构化代码使用。
+pub fn parse_guid(s: &str) -> Result<Guid, String> {
+    Ok(Guid::from_u8(guid_bytes(s)?))
+}
+
+/// 将存档内 FGuid 转为 Palworld 使用的四段 `u32` 文本格式。
+pub fn format_guid(guid: Guid) -> String {
+    let raw = guid.to_u8();
+    let mut text = String::with_capacity(32);
+    for chunk in raw.chunks_exact(4) {
+        let word = u32::from_le_bytes(chunk.try_into().unwrap());
+        use std::fmt::Write;
+        write!(&mut text, "{word:08X}").unwrap();
+    }
+    text
 }
 
 /// 解压 `.sav` 字节。
@@ -269,6 +1107,7 @@ fn encode_payload(raw: &[u8], compression: SavCompression) -> Result<Vec<u8>, St
 ///
 /// # 错误
 /// 派生 `TEMP` 已存在于缓冲区内或与 `new` 相同（无法安全交换）时返回错误，绝不静默损坏。
+#[cfg(test)]
 pub fn swap_guids(raw: &mut [u8], old: &[u8; 16], new: &[u8; 16]) -> Result<(), String> {
     if old == new {
         return Ok(());
@@ -291,6 +1130,7 @@ pub fn swap_guids(raw: &mut [u8], old: &[u8; 16], new: &[u8; 16]) -> Result<(), 
 }
 
 /// 把 `raw` 中所有 `from` 的 16 字节替换为 `to`（非重叠、逐次步进）。
+#[cfg(test)]
 fn replace_all(raw: &mut [u8], from: &[u8; 16], to: &[u8; 16]) {
     let mut i = 0;
     let n = raw.len();
@@ -325,6 +1165,7 @@ fn zlib_compress(data: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 /// 列出世界数据目录中所有需要处理的 `.sav` 文件（Level.sav / _dps.sav / Players/*.sav）。
+#[allow(dead_code)] // Kept for diagnostics and future format compatibility checks.
 pub fn list_world_sav_files(data_dir: &Path) -> Vec<std::path::PathBuf> {
     let mut out: Vec<std::path::PathBuf> = Vec::new();
     for name in ["Level.sav", "_dps.sav"] {
@@ -384,7 +1225,10 @@ pub fn custom_fields_mut(
 }
 
 /// 从字段表取第一个名为 `name` 的属性。
-pub fn field<'a>(map: &'a HashableIndexMap<String, Vec<Property>>, name: &str) -> Option<&'a Property> {
+pub fn field<'a>(
+    map: &'a HashableIndexMap<String, Vec<Property>>,
+    name: &str,
+) -> Option<&'a Property> {
     map.get(name).and_then(|v| v.first())
 }
 
@@ -415,6 +1259,7 @@ pub fn as_int(p: &Property) -> Option<i32> {
 }
 
 /// 取 `StrProperty` 的 `Option<String>`。
+#[allow(dead_code)]
 pub fn as_str(p: &Property) -> Option<&Option<String>> {
     match p {
         Property::StrProperty(StrProperty { value }) => Some(value),
@@ -423,6 +1268,7 @@ pub fn as_str(p: &Property) -> Option<&Option<String>> {
 }
 
 /// 取 `ArrayProperty::Strings` 的字符串表（可变）。
+#[allow(dead_code)]
 pub fn as_strings_mut(p: &mut Property) -> Option<&mut Vec<Option<String>>> {
     match p {
         Property::ArrayProperty(ArrayProperty::Strings { strings }) => Some(strings),
@@ -462,6 +1308,7 @@ pub fn as_struct_array(p: &Property) -> Option<&Vec<StructPropertyValue>> {
 
 /// 在 `CustomStruct` 字段表中递归设置字符串字段（含嵌套 CustomStruct）。
 /// 返回是否命中并改写。
+#[allow(dead_code)]
 pub fn set_str_in_custom(
     map: &mut HashableIndexMap<String, Vec<Property>>,
     name: &str,
@@ -490,6 +1337,7 @@ pub fn set_str_in_custom(
 }
 
 /// 在 `CustomStruct` 字段表中递归设置整数字段（含嵌套 CustomStruct）。
+#[allow(dead_code)]
 pub fn set_int_in_custom(
     map: &mut HashableIndexMap<String, Vec<Property>>,
     name: &str,
@@ -560,10 +1408,7 @@ mod tests {
         let path = tmp_path("cnk.sav");
         sav.save(&path).expect("save cnk");
         let loaded = SavFile::load(&path).expect("load cnk");
-        assert_eq!(
-            loaded.raw, raw,
-            "CNK (单层 zlib) 往返必须无损保留 raw 字节"
-        );
+        assert_eq!(loaded.raw, raw, "CNK (单层 zlib) 往返必须无损保留 raw 字节");
         assert_eq!(loaded.compression, SavCompression::Cnk);
         let _ = std::fs::remove_file(&path);
     }
@@ -579,10 +1424,7 @@ mod tests {
         let path = tmp_path("plz.sav");
         sav.save(&path).expect("save plz");
         let loaded = SavFile::load(&path).expect("load plz");
-        assert_eq!(
-            loaded.raw, raw,
-            "PLZ (双层 zlib) 往返必须无损保留 raw 字节"
-        );
+        assert_eq!(loaded.raw, raw, "PLZ (双层 zlib) 往返必须无损保留 raw 字节");
         assert_eq!(loaded.compression, SavCompression::Plz);
         let _ = std::fs::remove_file(&path);
     }
@@ -595,10 +1437,7 @@ mod tests {
         let path = tmp_path("plm.sav");
         std::fs::write(&path, &b).expect("write plm");
         let r = SavFile::load(&path);
-        assert!(
-            r.is_err(),
-            "PLM (Oodle) 必须被拒绝，而不是静默损坏存档"
-        );
+        assert!(r.is_err(), "PLM (Oodle) 必须被拒绝，而不是静默损坏存档");
         let msg = r.unwrap_err();
         assert!(
             msg.contains("Oodle"),
@@ -725,6 +1564,25 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod byte_serialization_tests {
+    use super::*;
+
+    #[test]
+    fn to_bytes_produces_a_complete_sav_that_can_be_decoded_without_disk_io() {
+        let original = SavFile {
+            raw: b"candidate-gvas-payload".to_vec(),
+            compression: SavCompression::Plz,
+        };
+
+        let encoded = original.to_bytes().expect("应能在内存中生成完整 sav 字节");
+        let (decoded, compression) = decode_sav(&encoded).expect("生成的 sav 字节必须可回读");
+
+        assert_eq!(decoded, original.raw);
+        assert_eq!(compression, SavCompression::Plz);
+    }
+}
+
 // T1 真实样本验收测试（内联 `#[cfg(test)]` 模块，不启用/改动上方被禁用的 `tests` 模块）。
 //
 // 说明：本 crate 是 binary-only（无 `[lib]` 目标），集成测试无法放在 `src-tauri/tests/`
@@ -768,7 +1626,8 @@ mod oodle_real_sample {
 
         let (uncompressed_len, compressed_len, magic, save_type) = sniff_header(&bytes);
         assert_eq!(
-            magic, *b"PlM",
+            magic,
+            *b"PlM",
             "样本 {} magic 应为 PlM，实为 {:?}",
             path.display(),
             magic
@@ -803,27 +1662,29 @@ mod oodle_real_sample {
 
     #[test]
     fn real_sample_level_sav_decodes() {
-        let Some(dir) = sample_dir() else { return; };
+        let Some(dir) = sample_dir() else {
+            return;
+        };
         let p = dir.join("Level.sav");
         let (declared, actual) = assert_real_plm_decodes(&p);
-        println!(
-            "[ok] Level.sav: uncompressed_len={declared}, 实际解出={actual}, GVAS=确认"
-        );
+        println!("[ok] Level.sav: uncompressed_len={declared}, 实际解出={actual}, GVAS=确认");
     }
 
     #[test]
     fn real_sample_levelmeta_sav_decodes() {
-        let Some(dir) = sample_dir() else { return; };
+        let Some(dir) = sample_dir() else {
+            return;
+        };
         let p = dir.join("LevelMeta.sav");
         let (declared, actual) = assert_real_plm_decodes(&p);
-        println!(
-            "[ok] LevelMeta.sav: uncompressed_len={declared}, 实际解出={actual}, GVAS=确认"
-        );
+        println!("[ok] LevelMeta.sav: uncompressed_len={declared}, 实际解出={actual}, GVAS=确认");
     }
 
     #[test]
     fn real_sample_one_player_sav_decodes() {
-        let Some(dir) = sample_dir() else { return; };
+        let Some(dir) = sample_dir() else {
+            return;
+        };
         let players = dir.join("Players");
         let mut savs: Vec<PathBuf> = std::fs::read_dir(&players)
             .expect("读取 Players 目录")
@@ -844,7 +1705,9 @@ mod oodle_real_sample {
     /// 再解码一次，断言与原始解出字节逐字节相等。
     #[test]
     fn real_sample_roundtrip_plz_lossless() {
-        let Some(dir) = sample_dir() else { return; };
+        let Some(dir) = sample_dir() else {
+            return;
+        };
         let p = dir.join("Level.sav");
 
         let bytes = std::fs::read(&p).expect("读取 Level.sav");
@@ -860,10 +1723,8 @@ mod oodle_real_sample {
             raw: gvas.clone(),
             compression: SavCompression::Plz,
         };
-        let tmp = std::env::temp_dir().join(format!(
-            "t1_roundtrip_{}_level_plz.sav",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("t1_roundtrip_{}_level_plz.sav", std::process::id()));
         recompressed.save(&tmp).expect("回写 PLZ");
 
         // 再解码一次
@@ -894,6 +1755,34 @@ mod oodle_real_sample {
             msg.contains("未知") || msg.contains("magic") || msg.contains("魔法"),
             "错误文案应提示未知 magic，实际: {msg}"
         );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// P0-2 验证：PLZ .sav 头部的 `compressed_len` 必须等于**内层** zlib 流长度
+    /// （双层压缩的第一层），而非整个 payload（外层）长度。游戏按此长度先解内层、再解外层。
+    #[test]
+    fn plz_header_compressed_len_is_inner() {
+        let raw: Vec<u8> = (0u8..=250).cycle().take(2000).collect();
+        let sav = SavFile {
+            raw: raw.clone(),
+            compression: SavCompression::Plz,
+        };
+        let tmp = std::env::temp_dir().join(format!("t1_p0_2_plz_{}.sav", std::process::id()));
+        sav.save(&tmp).expect("save plz");
+        let bytes = std::fs::read(&tmp).expect("read plz");
+        let compressed_len = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        let magic = &bytes[8..11];
+        assert_eq!(magic, b"PlZ", "magic 应为 PlZ");
+        // 内层长度 = 单层 zlib 压缩 raw 的长度（私有 `zlib_compress` 在本模块内可见）。
+        let inner = zlib_compress(&raw).expect("zlib inner");
+        assert_eq!(
+            compressed_len as usize,
+            inner.len(),
+            "PLZ 头部 compressed_len 应为内层 zlib 流长度"
+        );
+        // 整份仍可解压（往返无损）。
+        let reloaded = SavFile::load(&tmp).expect("reload plz");
+        assert_eq!(reloaded.raw, raw, "PLZ 往返应无损");
         let _ = std::fs::remove_file(&tmp);
     }
 
@@ -960,5 +1849,281 @@ mod oodle_real_sample {
         let before = raw.clone();
         swap_guids(&mut raw, &g, &g).expect("同值应空操作");
         assert_eq!(raw, before, "old==new 时不应改动任何字节");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 真实存档集成测试（只读 + 副本验证，绝不改动原始 E: 存档）
+// 仅在真实世界样本存在时运行，否则自动跳过。
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod real_save_integration {
+    use super::*;
+    use std::collections::HashMap;
+    use std::io::Cursor;
+    use std::path::PathBuf;
+
+    use gvas::error::Error as GvasError;
+    use gvas::game_version::GameVersion;
+    use gvas::GvasFile;
+
+    use crate::save_edit::fix_host::fix_host_save_multi;
+    use crate::save_edit::models::UidMapping;
+    use crate::save_edit::path_util;
+    use crate::save_edit::world_copy;
+
+    /// 候选真实世界目录（按存在性择优，任一存在即用）。
+    fn real_world_dirs() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from("E:/SteamLibrary/steamapps/common/PalServer/Pal/Saved/SaveGames/0/1A91A61548C7B6FD7B58B2B70710F7EE"),
+            PathBuf::from("F:/1/0/20260723-235259/1A91A61548C7B6FD7B58B2B70710F7EE"),
+        ]
+    }
+
+    /// 返回首个含 Level.sav 的候选世界目录；均无则 None（测试跳过）。
+    fn real_level_sav() -> Option<PathBuf> {
+        for d in real_world_dirs() {
+            let p = d.join("Level.sav");
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+        eprintln!("[skip] 真实样本 Level.sav 未找到，跳过集成测试");
+        None
+    }
+
+    /// 用给定 hints 表解析纯 GVAS 字节。
+    fn parse_with(gvas: &[u8], hints: &HashMap<String, String>) -> Result<GvasFile, String> {
+        let mut cursor = Cursor::new(gvas.to_vec());
+        GvasFile::read_with_hints(&mut cursor, GameVersion::Default, hints)
+            .map_err(|e: GvasError| format!("{}", e))
+    }
+
+    /// 从 `Missing hint for struct X at path Y at position 0x...` 解析出 path。
+    fn extract_missing_hint_path(msg: &str) -> Option<String> {
+        let idx = msg.find("at path ")?;
+        let rest = &msg[idx + "at path ".len()..];
+        let end = rest.find(" at position").unwrap_or(rest.len());
+        Some(rest[..end].trim().to_string())
+    }
+
+    /// 运行时迭代补 hint：从 `palworld_hints()` 出发，反复 read_with_hints，
+    /// 遇 MissingHint(path) 补一条（Guid 键/数组元素→Guid，其余→StructProperty），
+    /// 直到成功或达上限。返回 (成功?, 最终 hints 表)。
+    fn discover_hints(gvas: &[u8]) -> (bool, HashMap<String, String>) {
+        let mut hints = palworld_hints();
+        const GUID_KEY_MAPS: &[&str] = &[
+            "GroupSaveDataMap",
+            "BaseCampSaveData",
+            "InvaderSaveData",
+            "GuildExtraSaveDataMap",
+            "SpawnerDataMapByLevelObjectInstanceId",
+            "SupplyInfos",
+            "RewardSaveDataMap",
+        ];
+        let decide = |path: &str| -> String {
+            if path.ends_with(".Key.StructProperty") {
+                for m in GUID_KEY_MAPS {
+                    if path.contains(&format!(".{}.MapProperty", m)) {
+                        return "Guid".to_string();
+                    }
+                }
+                return "StructProperty".to_string();
+            }
+            if path.contains(".ValidatedStartPointIds.") && path.ends_with(".StructProperty") {
+                return "Guid".to_string();
+            }
+            "StructProperty".to_string()
+        };
+        let mut ok = false;
+        for _ in 0..400 {
+            match parse_with(gvas, &hints) {
+                Ok(_) => {
+                    ok = true;
+                    break;
+                }
+                Err(e) => {
+                    if let Some(path) = extract_missing_hint_path(&e) {
+                        hints.insert(path.clone(), decide(&path));
+                    } else {
+                        eprintln!("[discover] 非 MissingHint 错误，停止迭代: {e}");
+                        break;
+                    }
+                }
+            }
+        }
+        (ok, hints)
+    }
+
+    /// 取 worldSaveData 内 CustomStruct 字段数（深度保真校验用）。
+    fn world_save_data_field_count(gvas: &GvasFile) -> Option<usize> {
+        let wsd = top_field(gvas, "worldSaveData")?;
+        let csv = struct_value(wsd)?;
+        let fields = custom_fields(csv)?;
+        Some(fields.len())
+    }
+
+    /// 只读 round-trip + hint 发现：真实 Level.sav 解码 → 迭代补 hint → 解析 → 写临时副本
+    /// → 回读 → 再解析，顶层键与 worldSaveData 字段数应一致。原档零写入。
+    /// 同时打印完整 hints 表（标记 HINT_ENTRY:）以便烘焙进 `palworld_hints()`。
+    #[test]
+    fn real_level_roundtrip_with_hints() {
+        let Some(level) = real_level_sav() else {
+            return;
+        };
+        let gvas = SavFile::load(&level).expect("load 真实 Level.sav").raw;
+
+        // 1) 迭代补 hint 直到可解析（同时收集完整 hints 表）。
+        let (ok, hints) = discover_hints(&gvas);
+        assert!(ok, "真实 Level.sav 在补齐 hints 后仍无法解析（见上方错误）");
+
+        let parsed = parse_with(&gvas, &hints).expect("用补全 hints 应能解析");
+        assert!(
+            parsed.properties.contains_key("worldSaveData"),
+            "应包含 worldSaveData"
+        );
+        let before_keys: Vec<&String> = parsed.properties.keys().collect();
+        let before_wsd = world_save_data_field_count(&parsed).unwrap_or(0);
+
+        // 2) round-trip：from_gvas → 写临时副本 → 回读 → 再解析（均用补全 hints）。
+        let sav = SavFile {
+            raw: gvas.clone(),
+            compression: SavCompression::Plz,
+        };
+        let tmp = std::env::temp_dir().join(format!("real_rt_{}.level.sav", std::process::id()));
+        sav.save(&tmp).expect("回写临时副本");
+        let reloaded = SavFile::load(&tmp).expect("回读临时副本");
+        let reparsed = parse_with(&reloaded.raw, &hints).expect("临时副本应能 re-parse");
+        let after_keys: Vec<&String> = reparsed.properties.keys().collect();
+        let after_wsd = world_save_data_field_count(&reparsed).unwrap_or(0);
+        assert_eq!(before_keys, after_keys, "round-trip 顶层键必须一致");
+        assert_eq!(
+            before_wsd, after_wsd,
+            "round-trip worldSaveData 字段数必须一致（深度保真）"
+        );
+        let _ = std::fs::remove_file(&tmp);
+
+        // 3) 打印完整 hints 表（供烘焙进 palworld_hints()）。
+        let mut keys: Vec<&String> = hints.keys().collect();
+        keys.sort();
+        for k in keys {
+            println!("HINT_ENTRY: {} => {}", k, hints.get(k).unwrap());
+        }
+        println!(
+            "[ok] 真实 Level.sav 用 {} 条 hints 解析成功，round-trip 无损（顶层键 {}，worldSaveData 字段 {}）",
+            hints.len(),
+            before_keys.len(),
+            before_wsd
+        );
+    }
+
+    /// 用静态 `palworld_hints()` 解析真实 Level.sav（无需运行时补 hint）。
+    /// 仅作用于只读加载，原档零写入。烘焙完整 hints 后应稳定通过。
+    #[test]
+    fn real_level_static_parse() {
+        let Some(level) = real_level_sav() else {
+            return;
+        };
+        let gvas = SavFile::load(&level).expect("load 真实 Level.sav").raw;
+        let parsed = parse_with(&gvas, &palworld_hints())
+            .expect("palworld_hints() 静态表应能解析真实 Level.sav（无 MissingHint）");
+        let wsd = world_save_data_field_count(&parsed).unwrap_or(0);
+        assert!(wsd > 0, "worldSaveData 应解析出字段");
+        println!(
+            "[ok] 静态 palworld_hints() 解析真实 Level.sav 成功（顶层键 {}，worldSaveData 字段 {}）",
+            parsed.properties.len(),
+            wsd
+        );
+    }
+
+    /// 结构化写入只能在字节级 round-trip 保真时启用。这个门槛针对真实存档，
+    /// 但只读原文件，不会触碰 E: 或 F:\\1 的任何存档。
+    #[test]
+    fn real_level_gvas_write_is_byte_exact() {
+        let Some(level) = real_level_sav() else {
+            return;
+        };
+        let original = SavFile::load(&level).expect("读取真实 Level.sav");
+        let parsed = original.parse().expect("真实 Level.sav 应能解析");
+        let serialized = SavFile::from_gvas(&parsed, original.compression)
+            .expect("真实 Level.sav 应能重新序列化");
+        assert_eq!(
+            serialized.raw, original.raw,
+            "未改动数据时 GVAS 写回必须逐字节保真；否则不得把它用于角色、公会或 DPS 写入"
+        );
+    }
+
+    /// 真实存档副本上执行身份交换，确认两位玩家都保留且所有二进制 UID 引用成对交换。
+    #[test]
+    fn real_level_identity_swap_preserves_both_players() {
+        let src = PathBuf::from(
+            "E:/SteamLibrary/steamapps/common/PalServer/Pal/Saved/SaveGames/\
+             _migration_backups/f5_1785081805544967700_2204/0/\
+             1A91A61548C7B6FD7B58B2B70710F7EE",
+        );
+        if !src.is_dir() {
+            eprintln!("[skip] 真实 E: 世界不存在，跳过: {}", src.display());
+            return;
+        }
+        let work = std::env::temp_dir().join(format!(
+            "palworld_dedup_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&work);
+        let mut n = 0usize;
+        path_util::copy_dir_recursive(&src, &work, &mut n).expect("拷贝真实世界到临时副本");
+
+        let old_disk = "00000000000000000000000000000001";
+        let new_disk = "4E239D4F000000000000000000000000";
+        let level_path = work.join("Level.sav");
+
+        let changed = fix_host_save_multi(
+            &work,
+            &[UidMapping {
+                old_uid: old_disk.to_string(),
+                new_uid: new_disk.to_string(),
+            }],
+        )
+        .expect("B/C 身份交换应成功");
+
+        SavFile::load(&level_path)
+            .expect("读交换后 Level")
+            .parse()
+            .expect("交换后的 Level.sav 必须可完整解析");
+
+        let summary = world_copy::f5_world_summary_by_path_impl(work.to_str().unwrap())
+            .expect("读取交换后角色摘要");
+        let yu = summary
+            .players
+            .iter()
+            .find(|p| p.nickname == "煜")
+            .expect("煜 应保留");
+        let yu2 = summary
+            .players
+            .iter()
+            .find(|p| p.nickname == "煜2")
+            .expect("煜2 应保留");
+        assert_eq!(
+            world_copy::guid_std(&guid_bytes(&yu.player_uid).unwrap()),
+            new_disk
+        );
+        assert_eq!(
+            world_copy::guid_std(&guid_bytes(&yu2.player_uid).unwrap()),
+            old_disk
+        );
+        assert!(work
+            .join("Players")
+            .join(format!("{old_disk}.sav"))
+            .is_file());
+        assert!(work
+            .join("Players")
+            .join(format!("{new_disk}.sav"))
+            .is_file());
+        println!("[ok] B/C 副本身份交换通过：改写 {changed} 文件，两位角色均保留");
+        let _ = std::fs::remove_dir_all(&work);
     }
 }

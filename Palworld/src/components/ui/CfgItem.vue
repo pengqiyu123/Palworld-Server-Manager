@@ -3,7 +3,7 @@
     <div class="row">
       <div class="label">
         <span class="name">{{ name }}</span>
-        <InfoTip v-if="tipHtml" :html="tipHtml" />
+        <InfoTip v-if="tipText" :text="tipText" />
       </div>
 
       <!-- 数字：点击进入内联输入，回车/失焦提交，校验 min/max，带 'x' 后缀 -->
@@ -65,7 +65,7 @@ const props = defineProps<{
   max?: number
   step?: number
   options?: string[]
-  tipHtml?: string
+  tipText?: string
   defaultText?: string
 }>()
 

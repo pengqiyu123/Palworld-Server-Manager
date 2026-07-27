@@ -10,29 +10,33 @@
 //!
 //! 不修改 F4（`save_transfer.rs` 等）任何代码；路径/备份等安全逻辑在 F5 内独立副本实现。
 
+pub mod atomic_write;
 pub mod fix_host;
 pub mod models;
+pub mod modifier;
 pub mod oodle;
 pub mod path_util;
 pub mod sav_io;
 pub mod tech_edit;
 pub mod transfer;
+pub mod v4_character_operation;
+pub mod v4_full_character_transfer;
+pub mod v4_guild_recovery;
+pub mod v4_migration;
+pub mod v4_workflow;
 pub mod world_copy;
 
 use std::path::{Path, PathBuf};
 
-use tauri::State;
+use tauri::{Emitter, State};
 
 use crate::save_edit::models::*;
 use crate::server::ServerState;
 
-/// F5 备份根目录：`SaveGames` 同级 `backups/<world>/<backup_id>`。
+/// F5 备份根目录：与世界备份/恢复共用 `SaveGames/_backups/<world>/<backup_id>`。
 fn backups_root() -> Result<PathBuf, String> {
     let (save_root, _auto) = path_util::resolve_save_games_root()?;
-    Ok(save_root
-        .parent()
-        .map(|p| p.join("backups"))
-        .unwrap_or_else(|| save_root.join("backups")))
+    Ok(save_root.join("_backups"))
 }
 
 /// 生成唯一备份 id（纳秒时间戳 + 进程 id）。
@@ -48,9 +52,18 @@ fn now_backup_id() -> String {
 /// 备份世界数据目录，返回 backup_id。
 fn backup_world_dir(world: &str) -> Result<String, String> {
     let data_dir = path_util::world_data_dir(world)?;
-    let root = backups_root()?;
+    let settings = crate::settings::load_settings()?;
+    let root = if settings.backup_root.trim().is_empty() {
+        backups_root()?
+    } else {
+        PathBuf::from(settings.backup_root.trim())
+    };
+    let world_root = root.join(world);
+    if let Some(existing) = find_matching_backup(&data_dir, &world_root) {
+        return Ok(existing);
+    }
     let backup_id = now_backup_id();
-    let dest = root.join(world).join(&backup_id);
+    let dest = world_root.join(&backup_id);
     std::fs::create_dir_all(&dest)
         .map_err(|e| format!("创建备份目录 {} 失败: {}", dest.display(), e))?;
     let mut n = 0usize;
@@ -58,10 +71,65 @@ fn backup_world_dir(world: &str) -> Result<String, String> {
     Ok(backup_id)
 }
 
+/// 返回与当前世界逐文件一致的最近备份，避免迁移前重复创建相同快照。
+fn find_matching_backup(data_dir: &Path, world_root: &Path) -> Option<String> {
+    let mut candidates: Vec<(String, std::time::SystemTime)> = std::fs::read_dir(world_root)
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| {
+            let id = e.file_name().to_string_lossy().to_string();
+            let modified = e.metadata().and_then(|m| m.modified()).ok()?;
+            Some((id, modified))
+        })
+        .collect();
+    candidates.sort_by_key(|(_, time)| std::cmp::Reverse(*time));
+    candidates.into_iter().find_map(|(id, _)| {
+        let backup = world_root.join(&id);
+        dirs_equal(data_dir, &backup).then_some(id)
+    })
+}
+
+fn dirs_equal(left: &Path, right: &Path) -> bool {
+    let mut left_files = Vec::new();
+    let mut right_files = Vec::new();
+    collect_files(left, left, &mut left_files);
+    collect_files(right, right, &mut right_files);
+    left_files.sort_by(|a, b| a.0.cmp(&b.0));
+    right_files.sort_by(|a, b| a.0.cmp(&b.0));
+    left_files == right_files
+}
+
+fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(root, &path, out);
+        } else if path.is_file() {
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if let Ok(bytes) = std::fs::read(&path) {
+                out.push((rel, bytes));
+            }
+        }
+    }
+}
+
 /// 从备份回滚世界数据目录。
 fn restore_world_dir(world: &str, backup_id: &str) -> Result<(), String> {
     let data_dir = path_util::world_data_dir(world)?;
-    let root = backups_root()?;
+    let settings = crate::settings::load_settings()?;
+    let root = if settings.backup_root.trim().is_empty() {
+        backups_root()?
+    } else {
+        PathBuf::from(settings.backup_root.trim())
+    };
     let src = root.join(world).join(backup_id);
     if !src.is_dir() {
         return Err(format!("备份不存在: {}", src.display()));
@@ -73,13 +141,29 @@ fn restore_world_dir(world: &str, backup_id: &str) -> Result<(), String> {
 }
 
 /// 服务器停止断言：运行时拒绝改写。
-fn ensure_server_stopped(state: &ServerState) -> Result<(), String> {
-    if crate::server::is_server_process_running(&*state) {
-        return Err(
-            "服务器正在运行，请先停止服务器再执行存档改写操作（避免存档损坏）".to_string(),
-        );
+pub(crate) fn ensure_save_writes_allowed(
+    server_running: bool,
+    game_running: bool,
+) -> Result<(), String> {
+    match (server_running, game_running) {
+        (true, true) => Err(
+            "服务器和游戏客户端正在运行，请全部关闭后再修改存档（避免退出时覆盖修改）".to_string(),
+        ),
+        (true, false) => {
+            Err("服务器正在运行，请先停止服务器再执行存档改写操作（避免存档损坏）".to_string())
+        }
+        (false, true) => Err(
+            "游戏客户端正在运行，请先退出 Palworld 后再修改存档（避免退出时覆盖修改）".to_string(),
+        ),
+        (false, false) => Ok(()),
     }
-    Ok(())
+}
+
+pub(crate) fn ensure_server_stopped(state: &ServerState) -> Result<(), String> {
+    ensure_save_writes_allowed(
+        crate::server::is_server_process_running(&*state),
+        crate::server::is_palworld_game_running(),
+    )
 }
 
 /// T4 安全闸门：调用方必须显式声明目标世界对应的服务器是否已停止。
@@ -155,7 +239,13 @@ pub fn run_fix_host_with_guard(
         .map_err(|e| format!("备份世界 {} 失败: {}", data_dir.display(), e))?;
 
     // (c) 执行修复（T3 双向交换 + 回读校验）。
-    match fix_host::fix_host_save_in_dir(data_dir, &old_bytes, &new_bytes) {
+    match fix_host::fix_host_save_in_dir(
+        data_dir,
+        &old_bytes,
+        &new_bytes,
+        old_host_guid,
+        new_char_guid,
+    ) {
         Ok(changed) => Ok((changed, backup_path)),
         Err(e) => {
             // (d) 失败回滚：清除 data_dir 并从备份恢复，返回「已回滚」语义错误。
@@ -170,6 +260,148 @@ pub fn run_fix_host_with_guard(
             ))
         }
     }
+}
+
+// ===========================================================================
+// v2 分步迁移（A 世界，或 B/C 角色与公会绑定）+ 整份快照 / 回滚
+// ===========================================================================
+
+/// v2 分步迁移核心（不含停服检测，由命令层负责）。
+///
+/// 世界迁移和角色身份交换不能在同一次请求中执行。世界迁移完成后，玩家必须先进入
+/// 专用服生成目标角色，再单独执行 B/C 身份交换，否则阶段 A 会覆盖新角色。
+///
+/// 返回的结果含各阶段统计与整份快照 id（供回滚）。
+fn migrate_singleplayer_to_server_v2_impl(
+    req: &ThreePhaseMigrationRequest,
+    save_root: &Path,
+) -> Result<MigrationResult, String> {
+    if req.run_phase_a && (req.run_phase_b || req.run_phase_c) {
+        return Err(
+            "世界迁移与角色/公会绑定不能同时执行；请先迁移世界，进入服务器创建角色后再执行绑定"
+                .to_string(),
+        );
+    }
+    if req.run_phase_b != req.run_phase_c {
+        return Err("角色迁移与公会绑定必须一起执行，不能只运行其中一个阶段".to_string());
+    }
+
+    let mut result = MigrationResult::default();
+
+    if req.run_phase_a {
+        // 阶段 A：整包世界拷贝（复用既有迁移逻辑，覆盖式顶替目标世界数据层）。
+        let migrate_req = MigrateRequest {
+            source_world: req.source_world.clone(),
+            target_world: req.target_world.clone(),
+            source_type: req.source_type.clone(),
+            delete_world_option: req.delete_world_option,
+        };
+        result.phase_a_copied = world_copy::migrate_world_with_root(&migrate_req, save_root)?;
+    }
+
+    // B/C 是同一次身份交换：角色文件、Level.sav 中的角色记录和公会引用同步交换。
+    if req.run_phase_b && req.run_phase_c {
+        let data_dir = path_util::world_data_dir_with_root(&req.target_world, save_root)?;
+        let changed = fix_host::fix_host_save_multi(&data_dir, &req.mappings)?;
+        result.phase_b_changed = changed;
+        result.phase_c_changed = req.mappings.len();
+    }
+
+    result.ok = true;
+    Ok(result)
+}
+
+/// v2 迁移编排包装：整份快照 + 停服守卫 + 失败自动回滚。
+///
+/// 流程：
+/// 1. 停服守卫：未声明直接拒绝（不触碰磁盘）。
+/// 2. 整份快照：把 `SaveGames/0/` 完整拷贝到 `_migration_backups/<backup_id>/0/`
+///    （迁移前一次性备份，出问题可整份还原）。
+/// 3. 三阶段迁移（A 拷贝 → B 角色 → C 公会）。
+/// 4. 失败回滚：若某阶段抛错，用快照整份还原 `SaveGames/0/`，返回「已回滚」错误。
+pub fn run_migration_v2_with_guard(
+    req: &ThreePhaseMigrationRequest,
+    assertion: StopServerAssertion,
+    migration_backup_root: &Path,
+) -> Result<(MigrationResult, PathBuf), String> {
+    let (save_root, _auto) = path_util::resolve_save_games_root()?;
+    run_migration_v2_with_guard_at_root(req, assertion, &save_root, migration_backup_root)
+}
+
+fn run_migration_v2_with_guard_at_root(
+    req: &ThreePhaseMigrationRequest,
+    assertion: StopServerAssertion,
+    save_root: &Path,
+    migration_backup_root: &Path,
+) -> Result<(MigrationResult, PathBuf), String> {
+    if assertion == StopServerAssertion::Undeclared {
+        return Err(
+            "请先停止该世界对应的服务器，再执行三阶段迁移（运行中替换会被自动存档覆盖，\
+             导致迁移结果丢失或部分损坏）"
+                .to_string(),
+        );
+    }
+
+    // 每次操作都快照当前状态，避免后续失败回滚到陈旧的首次快照。
+    let backup_id = now_backup_id();
+    let backup_path = migration_backup_root.join(&backup_id);
+    let zero_dir = save_root.join("0");
+    if !zero_dir.is_dir() {
+        return Err(format!("SaveGames/0 目录不存在: {}", zero_dir.display()));
+    }
+    std::fs::create_dir_all(migration_backup_root).map_err(|e| {
+        format!(
+            "创建迁移备份根 {} 失败: {}",
+            migration_backup_root.display(),
+            e
+        )
+    })?;
+    let mut n = 0usize;
+    path_util::copy_dir_recursive(&zero_dir, &backup_path.join("0"), &mut n)
+        .map_err(|e| format!("整份快照 SaveGames/0/ 失败: {}", e))?;
+
+    // (3) 三阶段迁移。
+    match migrate_singleplayer_to_server_v2_impl(req, save_root) {
+        Ok(mut result) => {
+            result.backup_id = backup_id.clone();
+            Ok((result, backup_path))
+        }
+        Err(e) => {
+            // (4) 失败回滚：整份还原 SaveGames/0/。
+            match rollback_migration_v2_impl(&backup_path, save_root) {
+                Ok(()) => Err(format!(
+                    "三阶段迁移失败，已整份回滚至快照 {}: {}",
+                    backup_path.display(),
+                    e
+                )),
+                Err(rollback_error) => Err(format!(
+                    "三阶段迁移失败，且自动回滚失败（快照 {}）: {}; 回滚错误: {}",
+                    backup_path.display(),
+                    e,
+                    rollback_error
+                )),
+            }
+        }
+    }
+}
+
+/// 用整份快照还原 `SaveGames/0/`（v2 回滚核心）。
+fn rollback_migration_v2_impl(backup_path: &Path, save_root: &Path) -> Result<(), String> {
+    let backup_zero = backup_path.join("0");
+    if !backup_zero.is_dir() {
+        return Err(format!(
+            "迁移备份不完整（不含 0/ 目录）: {}",
+            backup_path.display()
+        ));
+    }
+    let zero_dir = save_root.join("0");
+    if zero_dir.is_dir() {
+        path_util::remove_dir_recursive(&zero_dir)?;
+    }
+    let mut n = 0usize;
+    path_util::copy_dir_recursive(&backup_zero, &zero_dir, &mut n)
+        .map_err(|e| format!("整份回滚 SaveGames/0/ 失败: {}", e))?;
+    Ok(())
 }
 
 // ===========================================================================
@@ -188,10 +420,55 @@ pub async fn f5_world_summary_by_path(path: String) -> Result<WorldSummary, Stri
     world_copy::f5_world_summary_by_path_impl(&path)
 }
 
-/// 科技列表（vendored world_data.json）。
 #[tauri::command]
-pub async fn f5_tech_list() -> Result<Vec<TechInfo>, String> {
-    tech_edit::f5_tech_list_impl()
+pub async fn get_modifier_world(
+    path: String,
+    state: State<'_, ServerState>,
+) -> Result<modifier::ModifierWorldState, String> {
+    let mut world = modifier::get_modifier_world_impl(&path)?;
+    world.server_running = crate::server::is_server_process_running(&*state);
+    world.game_running = crate::server::is_palworld_game_running();
+    Ok(world)
+}
+
+#[tauri::command]
+pub async fn discover_modifier_worlds() -> Result<Vec<modifier::ModifierWorldEntry>, String> {
+    let (save_root, _) = crate::save_transfer::resolve_save_games_root()?;
+    modifier::discover_modifier_worlds_in(&save_root)
+}
+
+#[tauri::command]
+pub async fn preview_modifier_action(
+    request: modifier::ModifierActionRequest,
+) -> Result<modifier::ModifierActionPreview, String> {
+    modifier::preview_modifier_action_impl(&request)
+}
+
+#[tauri::command]
+pub async fn apply_modifier_action(
+    request: modifier::ModifierActionRequest,
+    state: State<'_, ServerState>,
+    app: tauri::AppHandle,
+) -> Result<modifier::ModifierActionResult, String> {
+    let emit = |phase: modifier::ModifierProgressPhase| {
+        let _ = app.emit(
+            "modifier-operation-progress",
+            modifier::ModifierOperationProgress::from(phase),
+        );
+    };
+    emit(modifier::ModifierProgressPhase::CheckingProcesses);
+    ensure_server_stopped(&*state)?;
+    let settings = crate::settings::load_settings()?;
+    let backup_root = crate::backup_service::initialize_backup_root(&settings)?;
+    modifier::apply_modifier_action_in_dir_with_progress(&request, &backup_root, emit)
+}
+
+/// 修改器：读取指定角色的普通科技点和古代科技点（只读）。
+#[tauri::command]
+pub async fn get_player_technology_points(
+    req: PlayerTechnologyPointsRequest,
+) -> Result<PlayerTechnologyPoints, String> {
+    tech_edit::player_technology_points_impl(&req)
 }
 
 /// U01 Fix Host Save：旧主机角色 ↔ 新角色 UID 互换。
@@ -290,43 +567,53 @@ pub async fn transfer_character(
     }
 }
 
-/// T05 科技点编辑（解锁 / 移除）。
+/// 修改器：原子更新角色的普通科技点和古代科技点。
 #[tauri::command]
-pub async fn edit_tech(
-    req: TechEditRequest,
+pub async fn update_player_technology_points(
+    req: UpdatePlayerTechnologyPointsRequest,
     state: State<'_, ServerState>,
 ) -> Result<EditResult, String> {
     ensure_server_stopped(&*state)?;
-    let backup_id = backup_world_dir(&req.world)?;
-    match tech_edit::edit_tech_impl(&req) {
-        Ok(mut r) => {
-            r.backup_id = backup_id;
-            Ok(r)
-        }
-        Err(e) => {
-            let _ = restore_world_dir(&req.world, &backup_id);
-            Err(format!("科技点编辑失败，已回滚备份 {}: {}", backup_id, e))
-        }
+    tech_edit::update_player_technology_points_impl(&req)
+}
+
+/// v2 三阶段迁移（A 世界 → B 角色 → C 公会），附整份快照 + 失败回滚。
+#[tauri::command]
+pub async fn migrate_world_v2(
+    req: ThreePhaseMigrationRequest,
+    state: State<'_, ServerState>,
+) -> Result<MigrationResult, String> {
+    ensure_server_stopped(&*state)?;
+    let (save_root, _auto) = path_util::resolve_save_games_root()?;
+    let migration_backup_root = save_root.join("_migration_backups");
+    match run_migration_v2_with_guard(
+        &req,
+        StopServerAssertion::DeclaredStopped,
+        &migration_backup_root,
+    ) {
+        Ok((result, _backup_path)) => Ok(result),
+        Err(e) => Err(e),
     }
 }
 
-/// T05 玩家基础属性编辑（改名 / 等级 / Max All）。
+/// v2 整份回滚：用迁移前快照还原 `SaveGames/0/`。
 #[tauri::command]
-pub async fn edit_player_attr(
-    req: PlayerAttrRequest,
+pub async fn rollback_migration_v2(
+    req: RollbackRequest,
     state: State<'_, ServerState>,
 ) -> Result<EditResult, String> {
     ensure_server_stopped(&*state)?;
-    let backup_id = backup_world_dir(&req.world)?;
-    match tech_edit::edit_player_attr_impl(&req) {
-        Ok(mut r) => {
-            r.backup_id = backup_id;
-            Ok(r)
-        }
-        Err(e) => {
-            let _ = restore_world_dir(&req.world, &backup_id);
-            Err(format!("玩家属性编辑失败，已回滚备份 {}: {}", backup_id, e))
-        }
+    let (save_root, _auto) = path_util::resolve_save_games_root()?;
+    let migration_backup_root = save_root.join("_migration_backups");
+    let backup_path = migration_backup_root.join(&req.backup_id);
+    match rollback_migration_v2_impl(&backup_path, &save_root) {
+        Ok(()) => Ok(EditResult {
+            ok: true,
+            backup_id: req.backup_id,
+            roundtrip_ok: true,
+            warnings: vec![],
+        }),
+        Err(e) => Err(e),
     }
 }
 
@@ -342,29 +629,35 @@ pub async fn edit_player_attr(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gvas::engine_version::FEngineVersion;
+    use gvas::game_version::DeserializedGameVersion;
+    use gvas::properties::int_property::IntProperty;
+    use gvas::properties::map_property::MapProperty;
+    use gvas::properties::struct_property::{StructProperty, StructPropertyValue};
+    use gvas::properties::Property;
+    use gvas::types::map::HashableIndexMap;
+
+    #[test]
+    fn save_write_guard_rejects_server_or_game_processes() {
+        assert!(ensure_save_writes_allowed(false, false).is_ok());
+        assert!(ensure_save_writes_allowed(true, false)
+            .unwrap_err()
+            .contains("服务器正在运行"));
+        assert!(ensure_save_writes_allowed(false, true)
+            .unwrap_err()
+            .contains("游戏客户端正在运行"));
+    }
+    use gvas::types::Guid;
+    use gvas::{GvasFile, GvasHeader};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
 
-    /// 老板真实样本目录（Windows 绝对路径，Rust std 接受正斜杠）。该目录直接含
-    /// `Level.sav` 与 `Players/`，即为 `fix_host_save_in_dir` 所需的 `data_dir`。
-    const SAMPLE_DIR: &str = "F:/1/0/20260723-235259/1A91A61548C7B6FD7B58B2B70710F7EE";
-    /// 样本内两个真实玩家 GUID（磁盘序 32 位小写十六进制）。
+    /// 编排测试使用的两位玩家 UID。
     const OLD_GUID: &str = "3F5D130B000000000000000000000000";
     const NEW_GUID: &str = "4E239D4F000000000000000000000000";
 
-    fn sample_dir() -> Option<PathBuf> {
-        let p = PathBuf::from(SAMPLE_DIR);
-        if p.is_dir() {
-            Some(p)
-        } else {
-            eprintln!("[skip] 真实样本目录不存在，跳过 T4 测试: {}", SAMPLE_DIR);
-            None
-        }
-    }
-
-    /// 把真实样本整包拷到临时随机子目录（避免改动原始样本）。
+    /// 在临时目录生成有效 GVAS 世界，避免测试依赖会过期的外部备份路径。
     fn copy_sample_to_temp(tag: &str) -> Option<PathBuf> {
-        let src = sample_dir()?;
         let dst = std::env::temp_dir().join(format!(
             "palworld_t4_{}_{}_{}",
             tag,
@@ -372,8 +665,25 @@ mod tests {
             now_backup_id()
         ));
         let _ = std::fs::remove_dir_all(&dst);
-        let mut n = 0usize;
-        crate::save_edit::path_util::copy_dir_recursive(&src, &dst, &mut n).ok()?;
+        let players = dst.join("Players");
+        std::fs::create_dir_all(&players).ok()?;
+        let old_bytes = sav_io::guid_bytes(OLD_GUID).ok()?;
+        let new_bytes = sav_io::guid_bytes(NEW_GUID).ok()?;
+        let old_uid = Guid::from_u8(old_bytes);
+        let new_uid = Guid::from_u8(new_bytes);
+        write_test_level(&dst.join("Level.sav"), old_uid, new_uid);
+        write_test_player(
+            &players.join(format!("{}.sav", world_copy::guid_std(&old_bytes))),
+            old_uid,
+            Guid::from_u8([0xA1; 16]),
+            1,
+        );
+        write_test_player(
+            &players.join(format!("{}.sav", world_copy::guid_std(&new_bytes))),
+            new_uid,
+            Guid::from_u8([0xB2; 16]),
+            2,
+        );
         Some(dst)
     }
 
@@ -390,27 +700,115 @@ mod tests {
         r
     }
 
-    /// 单向 16 字节 GUID 替换（本地对拍，逻辑同 `SavFile::replace_guid_bytes`）。
-    fn replace_guid_bytes_local(raw: &mut Vec<u8>, old: &[u8; 16], new: &[u8; 16]) {
-        if old == new {
-            return;
-        }
-        let mut i = 0;
-        let len = raw.len();
-        while i + 16 <= len {
-            if raw[i..i + 16] == *old {
-                raw[i..i + 16].copy_from_slice(new);
-                i += 16;
-            } else {
-                i += 1;
-            }
-        }
-    }
-
     fn load_raw(p: &Path) -> Vec<u8> {
         crate::save_edit::sav_io::SavFile::load(p)
             .unwrap_or_else(|e| panic!("{} 应可解压: {}", p.display(), e))
             .raw
+    }
+
+    fn test_gvas(properties: HashableIndexMap<String, Property>) -> GvasFile {
+        GvasFile {
+            deserialized_game_version: DeserializedGameVersion::Default,
+            header: GvasHeader::Version2 {
+                package_file_version: 0x20B,
+                engine_version: FEngineVersion::new(5, 0, 0, 0, String::new()),
+                custom_version_format: 3,
+                custom_versions: HashableIndexMap::new(),
+                save_game_class_name: "TestSave".to_string(),
+            },
+            properties,
+        }
+    }
+
+    fn guid_property(value: Guid) -> Property {
+        Property::StructProperty(StructProperty::new(
+            Guid::from_u8([0; 16]),
+            "Guid".to_string(),
+            StructPropertyValue::Guid(value),
+        ))
+    }
+
+    fn write_test_player(path: &Path, uid: Guid, instance_id: Guid, marker: i32) {
+        let mut individual_id = HashableIndexMap::new();
+        individual_id.insert("InstanceId".to_string(), vec![guid_property(instance_id)]);
+        let mut save_data = HashableIndexMap::new();
+        save_data.insert(
+            "IndividualId".to_string(),
+            vec![Property::StructProperty(StructProperty::new(
+                Guid::from_u8([0; 16]),
+                "StructProperty".to_string(),
+                StructPropertyValue::CustomStruct(individual_id),
+            ))],
+        );
+        let mut properties = HashableIndexMap::new();
+        properties.insert(
+            "SaveData".to_string(),
+            Property::StructProperty(StructProperty::new(
+                Guid::from_u8([0; 16]),
+                "StructProperty".to_string(),
+                StructPropertyValue::CustomStruct(save_data),
+            )),
+        );
+        properties.insert("PlayerUId".to_string(), guid_property(uid));
+        properties.insert("TestMarker".to_string(), IntProperty::new(marker).into());
+        sav_io::SavFile::from_gvas(&test_gvas(properties), sav_io::SavCompression::Plz)
+            .expect("构造玩家 GVAS")
+            .save(path)
+            .expect("写玩家 GVAS");
+    }
+
+    fn cspm_key(uid: Guid, instance: Guid) -> Property {
+        let mut fields = HashableIndexMap::new();
+        fields.insert("PlayerUId".to_string(), vec![guid_property(uid)]);
+        fields.insert("InstanceId".to_string(), vec![guid_property(instance)]);
+        Property::StructPropertyValue(StructPropertyValue::CustomStruct(fields))
+    }
+
+    fn write_test_level(path: &Path, old_uid: Guid, new_uid: Guid) {
+        let mut entries = HashableIndexMap::new();
+        entries.insert(
+            cspm_key(old_uid, Guid::from_u8([0xA1; 16])),
+            Property::StructPropertyValue(StructPropertyValue::CustomStruct(
+                HashableIndexMap::new(),
+            )),
+        );
+        entries.insert(
+            cspm_key(new_uid, Guid::from_u8([0xB2; 16])),
+            Property::StructPropertyValue(StructPropertyValue::CustomStruct(
+                HashableIndexMap::new(),
+            )),
+        );
+        let cspm = Property::MapProperty(MapProperty::new(
+            "StructProperty".to_string(),
+            "StructProperty".to_string(),
+            0,
+            entries,
+        ));
+        let mut world_fields = HashableIndexMap::new();
+        world_fields.insert("CharacterSaveParameterMap".to_string(), vec![cspm]);
+        let mut properties = HashableIndexMap::new();
+        properties.insert(
+            "worldSaveData".to_string(),
+            Property::StructProperty(StructProperty::new(
+                Guid::from_u8([0; 16]),
+                "StructProperty".to_string(),
+                StructPropertyValue::CustomStruct(world_fields),
+            )),
+        );
+        sav_io::SavFile::from_gvas(&test_gvas(properties), sav_io::SavCompression::Plz)
+            .expect("构造 Level GVAS")
+            .save(path)
+            .expect("写 Level GVAS");
+    }
+
+    fn test_marker(path: &Path) -> i32 {
+        let gvas = sav_io::SavFile::load(path)
+            .expect("读取玩家 GVAS")
+            .parse()
+            .expect("解析玩家 GVAS");
+        sav_io::top_field(&gvas, "TestMarker")
+            .and_then(sav_io::as_int)
+            .expect("TestMarker")
     }
 
     /// 递归收集目录下所有文件（相对路径 → 绝对路径）。
@@ -465,7 +863,12 @@ mod tests {
             .map(|e| e.path())
             .filter(|p| p.is_dir())
             .collect();
-        assert_eq!(subs.len(), 1, "应恰好生成一个备份子目录，实际 {}", subs.len());
+        assert_eq!(
+            subs.len(),
+            1,
+            "应恰好生成一个备份子目录，实际 {}",
+            subs.len()
+        );
         subs.remove(0)
     }
 
@@ -504,7 +907,10 @@ mod tests {
             .flatten()
             .filter(|e| e.path().extension().map_or(false, |x| x == "sav"))
             .count();
-        assert!(player_count >= 2, "Players 文件不应被改动，实际 {player_count}");
+        assert!(
+            player_count >= 2,
+            "Players 文件不应被改动，实际 {player_count}"
+        );
         assert!(
             std::fs::read_dir(&bak).unwrap().flatten().next().is_none(),
             "拒绝时不应生成任何备份"
@@ -529,21 +935,14 @@ mod tests {
             StopServerAssertion::DeclaredStopped,
             &bak,
         );
-        assert!(
-            res.is_ok(),
-            "声明停服应成功执行；err={:?}",
-            res.err()
-        );
+        assert!(res.is_ok(), "声明停服应成功执行；err={:?}", res.err());
         let (_changed, backup_path) = res.unwrap();
         assert!(backup_path.exists(), "备份目录应存在");
         assert!(
             backup_path.join("Level.sav").is_file(),
             "备份应含 Level.sav"
         );
-        assert!(
-            backup_path.join("Players").is_dir(),
-            "备份应含 Players/"
-        );
+        assert!(backup_path.join("Players").is_dir(), "备份应含 Players/");
         assert!(
             std::fs::read_dir(&backup_path).unwrap().flatten().count() > 0,
             "备份应含世界文件"
@@ -569,8 +968,7 @@ mod tests {
         let players = work.join("Players");
         // 预创建 step(d) 的 tmp_swap 目标为目录（与 fix_host.rs 中 tmp_path 命名一致）。
         let tmp_swap = players.join(format!("{}.sav.tmp_swap", OLD_GUID.to_uppercase()));
-        std::fs::create_dir(&tmp_swap)
-            .unwrap_or_else(|e| panic!("创建 tmp_swap 目录失败: {}", e));
+        std::fs::create_dir(&tmp_swap).unwrap_or_else(|e| panic!("创建 tmp_swap 目录失败: {}", e));
 
         let res = run_fix_host_with_guard(
             &work,
@@ -620,10 +1018,6 @@ mod tests {
         let old_bytes = crate::save_edit::sav_io::guid_bytes(OLD_GUID).expect("解析 old GUID");
         let new_bytes = crate::save_edit::sav_io::guid_bytes(NEW_GUID).expect("解析 new GUID");
 
-        let old_pre = load_raw(&old_path);
-        let new_pre = load_raw(&new_path);
-        let level_pre = load_raw(&level_path);
-
         let res = run_fix_host_with_guard(
             &work,
             OLD_GUID,
@@ -631,55 +1025,299 @@ mod tests {
             StopServerAssertion::DeclaredStopped,
             &bak,
         );
-        assert!(
-            res.is_ok(),
-            "正常路径应成功；err={:?}",
-            res.err()
-        );
+        assert!(res.is_ok(), "正常路径应成功；err={:?}", res.err());
 
-        // OLD.sav 应等于（原 new 内容，new→old 替换）。
-        let old_post = load_raw(&old_path);
-        let mut expect_old = new_pre.clone();
-        replace_guid_bytes_local(&mut expect_old, &new_bytes, &old_bytes);
-        assert_eq!(
-            old_post, expect_old,
-            "OLD.sav 应等于（原 new 内容，new→old 替换）"
-        );
-        // NEW.sav 应等于（原 old 内容，old→new 替换）。
-        let new_post = load_raw(&new_path);
-        let mut expect_new = old_pre.clone();
-        replace_guid_bytes_local(&mut expect_new, &old_bytes, &new_bytes);
-        assert_eq!(
-            new_post, expect_new,
-            "NEW.sav 应等于（原 old 内容，old→new 替换）"
-        );
+        assert_eq!(test_marker(&new_path), 1, "目标 UID 文件应得到源角色数据");
+        assert_eq!(test_marker(&old_path), 2, "旧 UID 文件应保留目标角色数据");
 
-        // Level 3-pass：old/new 出现次数互换，且与 swap_guids 结果逐字节一致。
-        let level_post = load_raw(&level_path);
-        let c_old_pre = level_pre.windows(16).filter(|w| *w == &old_bytes).count();
-        let c_new_pre = level_pre.windows(16).filter(|w| *w == &new_bytes).count();
-        let c_old_post = level_post.windows(16).filter(|w| *w == &old_bytes).count();
-        let c_new_post = level_post.windows(16).filter(|w| *w == &new_bytes).count();
-        assert_eq!(
-            c_old_post, c_new_pre,
-            "Level 中 old 出现次数应 = 交换前 new 的次数"
-        );
-        assert_eq!(
-            c_new_post, c_old_pre,
-            "Level 中 new 出现次数应 = 交换前 old 的次数"
-        );
-        let mut expect_level = level_pre.clone();
-        crate::save_edit::sav_io::swap_guids(&mut expect_level, &old_bytes, &new_bytes)
-            .expect("swap_guids");
-        assert_eq!(
-            level_post, expect_level,
-            "Level.sav 应与 3-pass swap_guids 结果逐字节一致"
-        );
+        let level = sav_io::SavFile::load(&level_path)
+            .expect("读取交换后 Level")
+            .parse()
+            .expect("解析交换后 Level");
+        assert_eq!(sav_io::count_guid_in_gvas(&level, &old_bytes), 1);
+        assert_eq!(sav_io::count_guid_in_gvas(&level, &new_bytes), 1);
 
         // 备份仍保留（成功路径保留备份供审计）。
         let _backup_path = only_backup_subdir(&bak);
 
         let _ = std::fs::remove_dir_all(&work);
         let _ = std::fs::remove_dir_all(&bak);
+    }
+
+    // ---- 测试 5：v2 整份回滚核心（rollback_migration_v2_impl，temp 隔离） ----
+    #[test]
+    fn v2_rollback_restores_whole_savegames() {
+        let root =
+            std::env::temp_dir().join(format!("palworld_v2_rollback_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let save_root = root.join("SaveGames");
+        // 当前世界（将被损坏）
+        let live = save_root.join("0").join("TargetWorld").join("TGTGUID");
+        std::fs::create_dir_all(live.join("Players")).unwrap();
+        std::fs::write(live.join("Level.sav"), b"LIVE-LEVEL-V1").unwrap();
+        std::fs::write(live.join("Players").join("OLD.sav"), b"live-player").unwrap();
+
+        // 备份（模拟迁移前快照）
+        let backup = root.join("_migration_backups").join("bak1");
+        let backup_world = backup.join("0").join("TargetWorld").join("TGTGUID");
+        std::fs::create_dir_all(backup_world.join("Players")).unwrap();
+        std::fs::write(backup_world.join("Level.sav"), b"BACKUP-LEVEL").unwrap();
+        std::fs::write(
+            backup_world.join("Players").join("OLD.sav"),
+            b"backup-player",
+        )
+        .unwrap();
+
+        // 先「损坏」当前世界，再回滚
+        std::fs::write(live.join("Level.sav"), b"CORRUPT").unwrap();
+        let res = rollback_migration_v2_impl(&backup, &save_root);
+        assert!(res.is_ok(), "回滚应成功: {:?}", res.err());
+
+        assert_eq!(
+            std::fs::read(live.join("Level.sav")).unwrap(),
+            b"BACKUP-LEVEL",
+            "回滚后 Level.sav 应等于备份"
+        );
+        assert_eq!(
+            std::fs::read(live.join("Players").join("OLD.sav")).unwrap(),
+            b"backup-player",
+            "回滚后玩家存档应等于备份"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn v2_guard_creates_fresh_snapshot_for_each_operation() {
+        let root = std::env::temp_dir().join(format!(
+            "palworld_v2_fresh_backup_{}_{}",
+            std::process::id(),
+            now_backup_id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let save_root = root.join("SaveGames");
+        let zero = save_root.join("0");
+        let backups = root.join("backups");
+        std::fs::create_dir_all(&zero).unwrap();
+        std::fs::write(zero.join("state.txt"), b"first").unwrap();
+        let req = crate::save_edit::models::ThreePhaseMigrationRequest {
+            source_world: String::new(),
+            target_world: String::new(),
+            source_type: "server".to_string(),
+            delete_world_option: false,
+            mappings: vec![],
+            run_phase_a: false,
+            run_phase_b: false,
+            run_phase_c: false,
+        };
+
+        let (_, first) = run_migration_v2_with_guard_at_root(
+            &req,
+            StopServerAssertion::DeclaredStopped,
+            &save_root,
+            &backups,
+        )
+        .expect("第一次快照");
+        std::fs::write(zero.join("state.txt"), b"second").unwrap();
+        let (_, second) = run_migration_v2_with_guard_at_root(
+            &req,
+            StopServerAssertion::DeclaredStopped,
+            &save_root,
+            &backups,
+        )
+        .expect("第二次快照");
+
+        assert_ne!(first, second, "每次迁移必须有独立快照");
+        assert_eq!(std::fs::read(first.join("0/state.txt")).unwrap(), b"first");
+        assert_eq!(
+            std::fs::read(second.join("0/state.txt")).unwrap(),
+            b"second"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- 测试 6：世界迁移后单独执行 B/C 身份交换（temp 隔离） ----
+    #[test]
+    fn v2_phase_bc_swap_integrates_without_rerunning_world_copy() {
+        let root = std::env::temp_dir().join(format!("palworld_v2_mig_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let save_root = root.join("SaveGames");
+        let old_guid = "3F5D130B000000000000000000000000";
+        let old_bytes = crate::save_edit::sav_io::guid_bytes(old_guid).unwrap();
+        let old_value = Guid::from_u8(old_bytes);
+        let old_stem = world_copy::guid_std(&old_bytes);
+        let new_guid = "AAAAAAAA000000000000000000000000";
+        let new_bytes = crate::save_edit::sav_io::guid_bytes(new_guid).unwrap();
+        let new_value = Guid::from_u8(new_bytes);
+        let new_stem = world_copy::guid_std(&new_bytes);
+
+        // 目标世界已经完成 Phase A，且两位玩家均已存在。
+        let tgt = save_root.join("TargetWorld").join("TGTGUID");
+        std::fs::create_dir_all(tgt.join("Players")).unwrap();
+        write_test_level(&tgt.join("Level.sav"), old_value, new_value);
+        write_test_player(
+            &tgt.join("Players").join(format!("{}.sav", old_stem)),
+            old_value,
+            Guid::from_u8([0xA1; 16]),
+            1,
+        );
+        write_test_player(
+            &tgt.join("Players").join(format!("{}.sav", new_stem)),
+            new_value,
+            Guid::from_u8([0xB2; 16]),
+            2,
+        );
+
+        let req = crate::save_edit::models::ThreePhaseMigrationRequest {
+            source_world: String::new(),
+            target_world: "TargetWorld".to_string(),
+            source_type: "server".to_string(),
+            delete_world_option: false,
+            mappings: vec![crate::save_edit::models::UidMapping {
+                old_uid: old_guid.to_string(),
+                new_uid: new_guid.to_string(),
+            }],
+            run_phase_a: false,
+            run_phase_b: true,
+            run_phase_c: true,
+        };
+
+        let res = migrate_singleplayer_to_server_v2_impl(&req, &save_root);
+        assert!(res.is_ok(), "B/C 身份交换应成功: {:?}", res.err());
+        let r = res.unwrap();
+        assert!(r.ok, "result.ok 应为 true");
+        assert_eq!(r.phase_a_copied, 0, "不得再次运行世界迁移");
+        assert!(r.phase_b_changed > 0, "阶段B应改写文件");
+        assert_eq!(
+            r.phase_c_changed, 1,
+            "阶段C应随同一身份交换完成公会引用重绑"
+        );
+
+        // 双向交换：两个 CSPM 身份均保留并互换。
+        let tgt_level = sav_io::SavFile::load(&tgt.join("Level.sav"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(sav_io::count_guid_in_gvas(&tgt_level, &old_bytes), 1);
+        assert_eq!(sav_io::count_guid_in_gvas(&tgt_level, &new_bytes), 1);
+
+        // 两个文件都保留；new UID 得到源角色，old UID 保存服务器空角色。
+        let old_path = tgt.join("Players").join(format!("{}.sav", old_stem));
+        let new_path = tgt.join("Players").join(format!("{}.sav", new_stem));
+        assert!(old_path.is_file() && new_path.is_file());
+        assert_eq!(test_marker(&new_path), 1, "目标 UID 文件应得到源角色数据");
+        assert_eq!(
+            test_marker(&old_path),
+            2,
+            "旧 UID 文件应保留服务器新角色数据"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn v2_phase_bc_only_preserves_existing_target_without_source_world() {
+        let root =
+            std::env::temp_dir().join(format!("palworld_v2_phase_bc_only_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let save_root = root.join("SaveGames");
+        let target = save_root.join("TargetWorld").join("TGTGUID");
+        std::fs::create_dir_all(&target).unwrap();
+        let level_path = target.join("Level.sav");
+        std::fs::write(&level_path, b"TARGET-WORLD-MUST-NOT-BE-COPIED").unwrap();
+
+        // `run_phase_a=false` is the post-world-migration path. The source no
+        // longer needs to exist, and target data must remain in place before
+        // Phase B/C take ownership of it.
+        let req: ThreePhaseMigrationRequest = serde_json::from_value(serde_json::json!({
+            "source_world": "MissingSourceWorld",
+            "target_world": "TargetWorld",
+            "source_type": "server",
+            "delete_world_option": false,
+            "mappings": [],
+            "run_phase_a": false,
+            "run_phase_b": false,
+            "run_phase_c": false
+        }))
+        .expect("请求应可反序列化");
+
+        let result = migrate_singleplayer_to_server_v2_impl(&req, &save_root)
+            .expect("B/C-only 不应尝试读取不存在的源世界");
+        assert!(result.ok);
+        assert_eq!(result.phase_a_copied, 0);
+        assert_eq!(
+            std::fs::read(&level_path).unwrap(),
+            b"TARGET-WORLD-MUST-NOT-BE-COPIED",
+            "B/C-only 编排不得覆盖已经迁移并生成新角色的目标世界"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn v2_rejects_world_copy_combined_with_identity_swap_before_writing() {
+        let root = std::env::temp_dir().join(format!(
+            "palworld_v2_reject_combined_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let save_root = root.join("SaveGames");
+        let target = save_root.join("TargetWorld").join("TGTGUID");
+        std::fs::create_dir_all(&target).unwrap();
+        let level_path = target.join("Level.sav");
+        std::fs::write(&level_path, b"UNCHANGED").unwrap();
+
+        let req = ThreePhaseMigrationRequest {
+            source_world: "MissingSourceWorld".to_string(),
+            target_world: "TargetWorld".to_string(),
+            source_type: "server".to_string(),
+            delete_world_option: false,
+            mappings: vec![UidMapping {
+                old_uid: "00000000000000000000000000000001".to_string(),
+                new_uid: "4E239D4F000000000000000000000000".to_string(),
+            }],
+            run_phase_a: true,
+            run_phase_b: true,
+            run_phase_c: true,
+        };
+
+        let error = migrate_singleplayer_to_server_v2_impl(&req, &save_root)
+            .expect_err("世界迁移与身份交换不得在同一次请求中执行");
+        assert!(
+            error.contains("不能同时"),
+            "错误信息应说明操作互斥: {error}"
+        );
+        assert_eq!(std::fs::read(&level_path).unwrap(), b"UNCHANGED");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn v2_rejects_partial_identity_swap_before_writing() {
+        let save_root =
+            std::env::temp_dir().join(format!("palworld_v2_reject_partial_{}", std::process::id()));
+        let base = ThreePhaseMigrationRequest {
+            source_world: String::new(),
+            target_world: "MissingTarget".to_string(),
+            source_type: "server".to_string(),
+            delete_world_option: false,
+            mappings: vec![],
+            run_phase_a: false,
+            run_phase_b: true,
+            run_phase_c: false,
+        };
+
+        let phase_b_error = migrate_singleplayer_to_server_v2_impl(&base, &save_root)
+            .expect_err("只运行角色阶段必须被拒绝");
+        assert!(phase_b_error.contains("必须一起执行"));
+
+        let phase_c_only = ThreePhaseMigrationRequest {
+            run_phase_b: false,
+            run_phase_c: true,
+            ..base
+        };
+        let phase_c_error = migrate_singleplayer_to_server_v2_impl(&phase_c_only, &save_root)
+            .expect_err("只运行公会阶段必须被拒绝");
+        assert!(phase_c_error.contains("必须一起执行"));
     }
 }

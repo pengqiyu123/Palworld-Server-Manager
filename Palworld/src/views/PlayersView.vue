@@ -4,9 +4,30 @@
       <div>
         <div class="page-title">玩家管理 · 在线列表</div>
         <div class="page-sub">
-          在线 {{ players.length }} 人 · 数据每 60 秒自动刷新
-          <button class="btn btn-ghost btn-sm" style="margin-left: 8px" @click="onRefresh">手动刷新</button>
+          <template v-if="serverStore.playersState === 'live'">
+            在线 {{ players.length }} 人 · 每 3 秒自动刷新 · {{ playersUpdatedText }}
+          </template>
+          <template v-else-if="serverStore.playersState === 'loading'">正在读取在线玩家…</template>
+          <template v-else-if="serverStore.playersState === 'error'">在线名单读取失败</template>
+          <template v-else>服务器离线，在线名单未读取</template>
+          <button
+            class="btn btn-ghost btn-sm"
+            style="margin-left: 8px"
+            :disabled="manualRefreshing"
+            @click="onRefresh"
+          >
+            {{ manualRefreshing ? '刷新中…' : '立即刷新' }}
+          </button>
         </div>
+      </div>
+    </div>
+
+    <div v-if="serverStore.playersState === 'error'" class="players-live-error" role="alert">
+      <AppIcon name="info" :size="18" />
+      <div>
+        <strong>无法读取服务器在线数据</strong>
+        <p>{{ serverStore.playersError }}</p>
+        <span>请检查配置中的管理员密码是否与当前服务器实际使用的密码一致，然后重启服务器。</span>
       </div>
     </div>
 
@@ -51,10 +72,15 @@
           </tr>
         </tbody>
       </table>
-      <div v-else class="players-empty">
+      <div v-else-if="serverStore.playersState === 'live'" class="players-empty">
         <AppIcon name="players" :size="48" class="ph-icon" />
         <p>当前没有在线玩家</p>
         <span class="empty-hint">玩家进服后将自动出现在列表中</span>
+      </div>
+      <div v-else class="players-empty">
+        <AppIcon name="players" :size="48" class="ph-icon" />
+        <p>{{ serverStore.playersState === 'loading' ? '正在读取在线名单' : '暂无可显示的在线数据' }}</p>
+        <span class="empty-hint">{{ serverStore.playersState === 'error' ? '读取失败不等于无人在线' : '服务器就绪后会自动刷新' }}</span>
       </div>
     </div>
 
@@ -70,7 +96,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useServerStore } from '@/stores/server'
 import { useToast } from '@/components/ui/useToast'
 import type { PlayerInfo } from '@/types/tauri'
@@ -82,17 +108,37 @@ const toast = useToast()
 
 const players = computed(() => serverStore.players)
 const announceMsg = ref('')
+const manualRefreshing = ref(false)
+const playersUpdatedText = computed(() => {
+  const updatedAt = serverStore.playersLastUpdatedAt
+  return updatedAt
+    ? `${updatedAt.toLocaleTimeString('zh-CN', { hour12: false })} 已同步`
+    : '等待首次同步'
+})
+
+onMounted(() => {
+  void serverStore.pollOnce()
+})
 
 function formatCoord(v: number): string {
   return v.toFixed(0)
 }
 
 async function onRefresh(): Promise<void> {
+  manualRefreshing.value = true
   try {
-    await serverStore.pollOnce()
-    toast.info('玩家列表已刷新')
+    const outcome = await serverStore.pollOnce()
+    if (outcome === 'error' || serverStore.playersState === 'error') {
+      toast.error(`刷新失败: ${serverStore.playersError}`)
+    } else if (outcome === 'updated') {
+      toast.info('玩家列表已刷新')
+    } else {
+      toast.info('服务器尚未就绪，未刷新玩家列表')
+    }
   } catch (e) {
     toast.error(`刷新失败: ${e instanceof Error ? e.message : String(e)}`)
+  } finally {
+    manualRefreshing.value = false
   }
 }
 
@@ -161,6 +207,22 @@ async function onConfirm(): Promise<void> {
   gap: 10px;
   margin-bottom: 16px;
 }
+.players-live-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border: 1px solid rgba(201, 85, 77, 0.35);
+  border-radius: 8px;
+  background: rgba(201, 85, 77, 0.08);
+  color: var(--red, #c9554d);
+}
+.players-live-error strong,
+.players-live-error p,
+.players-live-error span { display: block; }
+.players-live-error p { margin: 2px 0; font-size: 12px; }
+.players-live-error span { color: var(--text-mid2, #8a7a6e); font-size: 11px; }
 .announce-input {
   flex: 1;
   padding: 8px 14px;

@@ -32,7 +32,7 @@
 
 <script setup lang="ts">
 import { ref, watch, nextTick } from 'vue'
-import { ChevronDown, ChevronRight } from 'lucide-vue-next'
+import { ChevronDown, ChevronRight } from '@lucide/vue'
 import { useServerStore } from '@/stores/server'
 import BaseButton from '@/components/ui/BaseButton.vue'
 

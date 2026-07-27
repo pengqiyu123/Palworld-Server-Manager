@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::command;
@@ -85,7 +85,7 @@ const STEAM_LIBRARY_ROOTS: &[&str] = &[
 ///   3. 兜底：扫描常见 Steam 库根下的 `steamapps/common/Palworld/Pal/Saved/SaveGames`。
 ///
 /// 返回 (save_root, auto_discovered)。
-fn resolve_save_games_root() -> Result<(PathBuf, bool), String> {
+pub(crate) fn resolve_save_games_root() -> Result<(PathBuf, bool), String> {
     let settings = crate::settings::load_settings()?;
     let server_path = settings.server_path.trim().to_string();
 
@@ -127,7 +127,10 @@ fn resolve_save_games_root() -> Result<(PathBuf, bool), String> {
     let dynamic = crate::steam_detect::detect_steam_library_roots();
     // 仅当动态探测完全失败时才回退到写死兜底（不在主探测路径）
     let fallback: Vec<std::path::PathBuf> = if dynamic.is_empty() {
-        STEAM_LIBRARY_ROOTS.iter().map(std::path::PathBuf::from).collect()
+        STEAM_LIBRARY_ROOTS
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect()
     } else {
         dynamic
     };
@@ -191,8 +194,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     }
     std::fs::create_dir_all(dst).map_err(|e| format!("创建目标目录失败: {}", e))?;
 
-    let entries =
-        std::fs::read_dir(src).map_err(|e| format!("读取源目录失败: {}", e))?;
+    let entries = std::fs::read_dir(src).map_err(|e| format!("读取源目录失败: {}", e))?;
     for entry in entries.flatten() {
         let file_type = entry
             .file_type()
@@ -226,6 +228,62 @@ fn dir_size(path: &Path) -> u64 {
         }
     }
     total
+}
+
+fn configured_world_backup_root(world_dir: &Path, world: &str) -> PathBuf {
+    if let Ok(settings) = crate::settings::load_settings() {
+        if !settings.backup_root.trim().is_empty() {
+            return PathBuf::from(settings.backup_root.trim()).join(world);
+        }
+    }
+    world_dir
+        .parent()
+        .map(|p| p.join("_backups").join(world))
+        .unwrap_or_else(|| world_dir.join("_backups").join(world))
+}
+
+fn find_matching_backup(world_dir: &Path, backup_root: &Path) -> Option<PathBuf> {
+    let mut candidates: Vec<(PathBuf, SystemTime)> = std::fs::read_dir(backup_root)
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| Some((e.path(), e.metadata().and_then(|m| m.modified()).ok()?)))
+        .collect();
+    candidates.sort_by_key(|(_, time)| std::cmp::Reverse(*time));
+    candidates
+        .into_iter()
+        .find_map(|(path, _)| dirs_equal(world_dir, &path).then_some(path))
+}
+
+fn dirs_equal(left: &Path, right: &Path) -> bool {
+    let mut left_files = Vec::new();
+    let mut right_files = Vec::new();
+    collect_files(left, left, &mut left_files);
+    collect_files(right, right, &mut right_files);
+    left_files.sort_by(|a, b| a.0.cmp(&b.0));
+    right_files.sort_by(|a, b| a.0.cmp(&b.0));
+    left_files == right_files
+}
+
+fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(root, &path, out);
+        } else if path.is_file() {
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if let Ok(bytes) = std::fs::read(&path) {
+                out.push((rel, bytes));
+            }
+        }
+    }
 }
 
 /// 统计 Players/ 下 .sav 数量。
@@ -280,7 +338,20 @@ fn days_to_ymd(days: i64) -> (i64, u32, u32) {
         y += 1;
     }
     let leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
-    let mdays = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mdays = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut mo = 0u32;
     let mut rem = d as u32;
     while (mo as usize) < mdays.len() && rem >= mdays[mo as usize] {
@@ -375,6 +446,38 @@ fn world_info_from_dir(world_dir: &Path) -> WorldInfo {
     }
 }
 
+/// 有界深度优先扫描：收集 `root` 下所有「自身直接含 `Level.sav`」的目录（即真正的世界数据层）。
+///
+/// 用于手动选目录兜底（`discover_local_worlds` 的 extra_root 分支），兼容本机单机导出的
+/// `<SteamID>/<timestamp>/<GUID>/Level.sav` 等多层包裹结构。
+/// `max_depth` 为从 `root` 出发允许下探的层数预算（不含 root 自身）。
+///
+/// - 命中 `root` 自身含 `Level.sav` 即收为数据层（扁平布局 / 已是最深目录），并不再下探其内部子目录。
+/// - 收集的是「数据层目录」而非仅作包裹层的祖先目录（如 SteamID / timestamp），避免重复与误判。
+/// - 遇不可读目录（`read_dir` 失败）静默跳过，整体**绝不 panic**；找不到返回空。
+fn collect_world_data_dirs(root: &Path, max_depth: usize, out: &mut Vec<PathBuf>) {
+    // 1) root 自身即为世界数据层（扁平布局 / 已是最深数据目录）→ 直接收下
+    if root.join("Level.sav").is_file() {
+        out.push(root.to_path_buf());
+        return;
+    }
+    // 2) 预算耗尽：不再下探
+    if max_depth == 0 {
+        return;
+    }
+    // 3) 读目录失败（权限/不存在/非目录）直接放弃该分支，整体不 panic
+    let entries = match std::fs::read_dir(root) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            collect_world_data_dirs(&p, max_depth - 1, out);
+        }
+    }
+}
+
 // ==================== Tauri 命令 ====================
 
 /// F4-P0：扫描 SaveGames 下含 Level.sav 的目录作为世界列表。
@@ -386,8 +489,7 @@ pub async fn discover_worlds(extra_root: Option<String>) -> Result<DiscoverResul
     let mut worlds: Vec<WorldInfo> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    let entries = std::fs::read_dir(&save_root)
-        .map_err(|e| format!("读取存档目录失败: {}", e))?;
+    let entries = std::fs::read_dir(&save_root).map_err(|e| format!("读取存档目录失败: {}", e))?;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -494,7 +596,10 @@ pub async fn discover_local_worlds(extra_root: Option<String>) -> Result<Vec<Wor
     let dyn_roots = crate::steam_detect::detect_steam_library_roots();
     // ⚠️ 不能对 `to_string_lossy()` 返回的临时 Cow 取借用（E0515），
     //    先物化到拥有所有权的 String 缓冲，再取 &str 切片。
-    let owned: Vec<String> = dyn_roots.iter().map(|p| p.to_string_lossy().to_string()).collect();
+    let owned: Vec<String> = dyn_roots
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
     let root_strs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
     for mut w in discover_local_worlds_in(&root_strs) {
         w.source = "steam".to_string();
@@ -523,27 +628,27 @@ pub async fn discover_local_worlds(extra_root: Option<String>) -> Result<Vec<Wor
         }
     }
 
-    // 3) 手动选目录兜底：将用户指定的目录作为额外扫描根
-    //    （支持直接选 SaveGames 目录，或选含 SaveGames 的父目录）。
+    // 3) 手动选目录兜底：将用户指定的目录作为额外扫描根。
+    //    支持直接选 SaveGames 目录、选含 SaveGames 的父目录，或选更深的本机单机存档
+    //    （如 <SteamID>/<timestamp>/<GUID>/Level.sav 三层包裹结构）。
+    //    采用有界 DFS（最大深度 3）穿透多层包裹目录，定位任何直接含 Level.sav 的世界数据层。
     if let Some(root) = extra_root {
         let root_path = Path::new(&root);
-        let save_games = if root_path.join("SaveGames").is_dir() {
+        let scan = if root_path.join("SaveGames").is_dir() {
             root_path.join("SaveGames")
         } else {
             root_path.to_path_buf()
         };
-        if save_games.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(&save_games) {
-                for entry in entries.flatten() {
-                    let p = entry.path();
-                    if !p.is_dir() {
-                        continue;
-                    }
-                    let mut w = world_info_from_dir(&p);
-                    w.source = "appdata".to_string();
-                    if w.has_level_sav && seen.insert(w.path.clone()) {
-                        worlds.push(w);
-                    }
+        if scan.is_dir() {
+            // 有界深度优先扫描（最大深度 3）：收集所有直接含 Level.sav 的世界数据目录。
+            // 不收集仅作包裹层的祖先目录，避免重复；再经 world_info_from_dir 解析完整信息。
+            let mut world_dirs: Vec<PathBuf> = Vec::new();
+            collect_world_data_dirs(&scan, 3, &mut world_dirs);
+            for d in world_dirs {
+                let mut w = world_info_from_dir(&d);
+                w.source = "appdata".to_string();
+                if w.has_level_sav && seen.insert(w.path.clone()) {
+                    worlds.push(w);
                 }
             }
         }
@@ -570,32 +675,38 @@ pub async fn backup_world(world_path: String, dest: Option<String>) -> Result<St
         .and_then(|s| s.to_str())
         .map(|s| s.to_string())
         .ok_or_else(|| "世界路径非法".to_string())?;
-    let world = safe_name_segment(&raw)
-        .ok_or_else(|| "世界名含非法字符".to_string())?;
+    let world = safe_name_segment(&raw).ok_or_else(|| "世界名含非法字符".to_string())?;
 
     let ts = format_timestamp(SystemTime::now());
     // 确定目标目录：
     //  - 自定义 dest = 「存放目录」，实际落 dest/<world>/<timestamp>/（即使 dest 已存在也不冲突）
     //  - 默认 = 世界目录同级的 _backups/<world>/<timestamp>/
-    let backup_dir = match dest {
+    let backup_parent = match dest {
         Some(d) if !d.trim().is_empty() => {
             let p = PathBuf::from(d.trim());
             if !p.is_absolute() {
                 return Err("自定义存放目录需为绝对路径（请用系统文件夹选择器）".to_string());
             }
-            if p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+            if p.components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
                 return Err("备份目标路径不得包含 '..'".to_string());
             }
-            p.join(&world).join(&ts)
+            p.join(&world)
         }
         _ => {
             let parent = world_dir
                 .parent()
                 .map(|p| p.to_path_buf())
                 .unwrap_or_else(|| world_dir.clone());
-            parent.join("_backups").join(&world).join(&ts)
+            parent.join("_backups").join(&world)
         }
     };
+
+    if let Some(existing) = find_matching_backup(&world_dir, &backup_parent) {
+        return Ok(format!("已存在相同世界备份：{}", existing.display()));
+    }
+    let backup_dir = backup_parent.join(&ts);
 
     if backup_dir.exists() {
         return Err(format!("备份目标已存在: {}", backup_dir.display()));
@@ -614,16 +725,20 @@ pub async fn backup_world(world_path: String, dest: Option<String>) -> Result<St
 #[command]
 pub async fn list_world_backups(world_path: String) -> Result<Vec<WorldBackupInfo>, String> {
     let world_dir = PathBuf::from(world_path.trim());
-    let raw = world_dir.file_name().and_then(|s| s.to_str()).map(|s| s.to_string()).ok_or_else(|| "世界路径非法".to_string())?;
+    let raw = world_dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "世界路径非法".to_string())?;
     let world = safe_name_segment(&raw).ok_or_else(|| "世界名非法".to_string())?;
-    let backups_root = world_dir.parent().map(|p| p.join("_backups").join(&world)).unwrap_or_else(|| world_dir.join("_backups").join(&world));
+    let backups_root = configured_world_backup_root(&world_dir, &world);
     if !backups_root.is_dir() {
         return Ok(Vec::new());
     }
 
     let mut result: Vec<WorldBackupInfo> = Vec::new();
-    let entries = std::fs::read_dir(&backups_root)
-        .map_err(|e| format!("读取备份目录失败: {}", e))?;
+    let entries =
+        std::fs::read_dir(&backups_root).map_err(|e| format!("读取备份目录失败: {}", e))?;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -660,16 +775,23 @@ pub async fn list_world_backups(world_path: String) -> Result<Vec<WorldBackupInf
 #[command]
 pub async fn restore_world(world_path: String, backup_id: String) -> Result<String, String> {
     let world_dir = PathBuf::from(world_path.trim());
-    let raw = world_dir.file_name().and_then(|s| s.to_str()).map(|s| s.to_string()).ok_or_else(|| "世界路径非法".to_string())?;
+    let raw = world_dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "世界路径非法".to_string())?;
     let world = safe_name_segment(&raw).ok_or_else(|| "世界名非法".to_string())?;
     let bid = safe_name_segment(&backup_id).ok_or_else(|| "备份 id 非法".to_string())?;
-    let backup_dir = world_dir.parent().map(|p| p.join("_backups").join(&world).join(&bid)).unwrap_or_else(|| world_dir.join("_backups").join(&world).join(&bid));
-    if !backup_dir.is_dir() { return Err(format!("备份不存在: {}", backup_dir.display())); }
-    if !world_dir.is_dir() { return Err(format!("目标世界目录不存在: {}", world_dir.display())); }
+    let backup_dir = configured_world_backup_root(&world_dir, &world).join(&bid);
+    if !backup_dir.is_dir() {
+        return Err(format!("备份不存在: {}", backup_dir.display()));
+    }
+    if !world_dir.is_dir() {
+        return Err(format!("目标世界目录不存在: {}", world_dir.display()));
+    }
 
     // 覆盖拷贝（先清空再拷，保证备份完全还原）
-    std::fs::remove_dir_all(&world_dir)
-        .map_err(|e| format!("清理当前世界失败: {}", e))?;
+    std::fs::remove_dir_all(&world_dir).map_err(|e| format!("清理当前世界失败: {}", e))?;
     copy_dir_recursive(&backup_dir, &world_dir)?;
 
     Ok(format!(
@@ -683,19 +805,29 @@ pub async fn restore_world(world_path: String, backup_id: String) -> Result<Stri
 #[command]
 pub async fn restore_world_from(world_path: String, src: String) -> Result<String, String> {
     let world_dir = PathBuf::from(world_path.trim());
-    let raw = world_dir.file_name().and_then(|s| s.to_str()).map(|s| s.to_string()).ok_or_else(|| "世界路径非法".to_string())?;
+    let raw = world_dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "世界路径非法".to_string())?;
     let world = safe_name_segment(&raw).ok_or_else(|| "世界名非法".to_string())?;
-    if !world_dir.is_dir() { return Err(format!("目标世界目录不存在: {}", world_dir.display())); }
+    if !world_dir.is_dir() {
+        return Err(format!("目标世界目录不存在: {}", world_dir.display()));
+    }
     let src_path = PathBuf::from(src.trim());
     // 仅拒绝含父目录回退('..')的路径穿越
-    if src_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) { return Err("源路径不得包含 '..'".to_string()); }
+    if src_path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err("源路径不得包含 '..'".to_string());
+    }
     if !src_path.is_dir() {
         return Err(format!("源备份目录不存在: {}", src_path.display()));
     }
 
     // 覆盖拷贝（先清空再拷，保证完全还原）
-    std::fs::remove_dir_all(&world_dir)
-        .map_err(|e| format!("清理当前世界失败: {}", e))?;
+    std::fs::remove_dir_all(&world_dir).map_err(|e| format!("清理当前世界失败: {}", e))?;
     copy_dir_recursive(&src_path, &world_dir)?;
 
     Ok(format!(
@@ -713,8 +845,7 @@ pub async fn export_character(
     dest_path: String,
 ) -> Result<String, String> {
     let (save_root, _auto) = resolve_save_games_root()?;
-    let world = safe_name_segment(&world_name)
-        .ok_or_else(|| "世界名非法".to_string())?;
+    let world = safe_name_segment(&world_name).ok_or_else(|| "世界名非法".to_string())?;
     let sid = normalize_steam_id(&steam_id)
         .ok_or_else(|| "SteamID 非法（仅允许字母/数字/下划线/点/连字符）".to_string())?;
 
@@ -733,12 +864,10 @@ pub async fn export_character(
     let dest = PathBuf::from(dest_path.trim());
     if let Some(parent) = dest.parent() {
         if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("创建目标目录失败: {}", e))?;
+            std::fs::create_dir_all(parent).map_err(|e| format!("创建目标目录失败: {}", e))?;
         }
     }
-    std::fs::copy(&src, &dest)
-        .map_err(|e| format!("导出角色失败: {}", e))?;
+    std::fs::copy(&src, &dest).map_err(|e| format!("导出角色失败: {}", e))?;
 
     Ok(format!("已导出角色 {} → {}", sid, dest.display()))
 }
@@ -752,8 +881,7 @@ pub async fn import_character(
     src_path: String,
 ) -> Result<String, String> {
     let (save_root, _auto) = resolve_save_games_root()?;
-    let world = safe_name_segment(&world_name)
-        .ok_or_else(|| "世界名非法".to_string())?;
+    let world = safe_name_segment(&world_name).ok_or_else(|| "世界名非法".to_string())?;
     let sid = normalize_steam_id(&steam_id)
         .ok_or_else(|| "SteamID 非法（仅允许字母/数字/下划线/点/连字符）".to_string())?;
 
@@ -779,11 +907,9 @@ pub async fn import_character(
     let data_dir = find_world_data_dir(&world_dir)
         .ok_or_else(|| format!("未找到世界数据(Level.sav)：{}", world_dir.display()))?;
     let players_dir = data_dir.join("Players");
-    std::fs::create_dir_all(&players_dir)
-        .map_err(|e| format!("创建 Players 目录失败: {}", e))?;
+    std::fs::create_dir_all(&players_dir).map_err(|e| format!("创建 Players 目录失败: {}", e))?;
     let dst = players_dir.join(format!("{}.sav", sid));
-    std::fs::copy(&src, &dst)
-        .map_err(|e| format!("导入角色失败: {}", e))?;
+    std::fs::copy(&src, &dst).map_err(|e| format!("导入角色失败: {}", e))?;
 
     Ok(format!(
         "已导入角色 {} → {}（SteamID 保持不变；公会归属未迁移，属预期）",
@@ -806,9 +932,8 @@ mod tests {
     /// 仅当该路径存在时执行，避免在无此路径的 CI 环境中失败。
     #[test]
     fn discover_real_palserver_world() {
-        let root = Path::new(
-            "E:\\SteamLibrary\\steamapps\\common\\PalServer\\Pal\\Saved\\SaveGames",
-        );
+        let root =
+            Path::new("E:\\SteamLibrary\\steamapps\\common\\PalServer\\Pal\\Saved\\SaveGames");
         if !root.is_dir() {
             eprintln!("skip: 本机无 PalServer 存档目录，跳过冒烟校验");
             return;
@@ -861,14 +986,13 @@ mod tests {
         std::fs::write(guid.join("Level.sav"), b"fake-level").unwrap();
         // Players/ 位于 GUID 数据层内（与真实 Palworld 结构一致）
         std::fs::create_dir_all(guid.join("Players")).unwrap();
-        std::fs::write(
-            guid.join("Players").join("76561190000000001.sav"),
-            b"x",
-        )
-        .unwrap();
+        std::fs::write(guid.join("Players").join("76561190000000001.sav"), b"x").unwrap();
 
         let dd = find_world_data_dir(&world);
-        assert!(dd.is_some(), "应定位到含 Level.sav 的数据层（扁平或 GUID 嵌套）");
+        assert!(
+            dd.is_some(),
+            "应定位到含 Level.sav 的数据层（扁平或 GUID 嵌套）"
+        );
         let info = world_info_from_dir(&world);
         assert!(info.has_level_sav, "WorldInfo.has_level_sav 应为 true");
         assert_eq!(info.player_count, 1, "应统计到 1 个角色存档");
@@ -897,11 +1021,7 @@ mod tests {
         std::fs::create_dir_all(&guid_dir).unwrap();
         std::fs::write(guid_dir.join("Level.sav"), b"fake-level").unwrap();
         std::fs::create_dir_all(guid_dir.join("Players")).unwrap();
-        std::fs::write(
-            guid_dir.join("Players").join("76561190000000001.sav"),
-            b"x",
-        )
-        .unwrap();
+        std::fs::write(guid_dir.join("Players").join("76561190000000001.sav"), b"x").unwrap();
 
         let root_str = root.to_str().expect("temp path should be UTF-8");
         let worlds = discover_local_worlds_in(&[root_str]);
@@ -920,12 +1040,56 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// R5（修复）：手动选目录（`extra_root`）支持 <SteamID>/<timestamp>/<GUID>/Level.sav
+    /// 三层包裹结构。构造临时 root，选 root 作为 extra_root，验证有界 DFS（最大深度 3）
+    /// 能下钻命中最深层数据目录，且返回世界的 path 含 {GUID}、has_level_sav==true。
+    #[tokio::test]
+    async fn discover_local_worlds_extra_root_finds_wrapped_world() {
+        let root = std::env::temp_dir().join("palworld_local_extra_root_wrap");
+        let _ = std::fs::remove_dir_all(&root);
+        // root/<SteamID>/<timestamp>/<GUID>/Level.sav (+ Players/player.sav)
+        let steam_id_dir = root.join("76561199381352956");
+        let ts_dir = steam_id_dir.join("20260724-183232");
+        let guid_dir = ts_dir.join("A1B2C3D4-0000-1111-2222-333344445555");
+        std::fs::create_dir_all(&guid_dir).unwrap();
+        std::fs::write(guid_dir.join("Level.sav"), b"fake-level").unwrap();
+        std::fs::create_dir_all(guid_dir.join("Players")).unwrap();
+        std::fs::write(guid_dir.join("Players").join("76561199381352956.sav"), b"x").unwrap();
+
+        let guid_name = guid_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap()
+            .to_string();
+        let root_str = root
+            .to_str()
+            .expect("temp path should be UTF-8")
+            .to_string();
+        let worlds = discover_local_worlds(Some(root_str)).await.unwrap();
+
+        let found = worlds
+            .iter()
+            .find(|w| w.path.contains(&guid_name) && w.has_level_sav)
+            .expect("extra_root 有界 DFS 应命中三层包裹下的世界数据目录");
+        assert!(
+            found.path.ends_with(&guid_name),
+            "path 应指向含 Level.sav 的数据层目录（{{GUID}}），实际: {}",
+            found.path
+        );
+        assert_eq!(found.player_count, 1, "应统计到 1 个角色存档");
+        assert_eq!(found.source, "appdata", "手动选目录来源标记为 appdata");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// 真实冒烟：用户把「存放目录」选为已存在的 F:\1 风格目录，
     /// 修复后 dest 作为存放目录、实际落 dest/<world>/<timestamp>/，不应再报「目标已存在」。
     /// 注：backup_world 为 async 命令，故此处用 #[tokio::test] + .await 驱动（与既有 discover_local_worlds_returns_ok 一致）。
     #[tokio::test]
     async fn backup_world_to_existing_custom_dest() {
-        let base = std::env::temp_dir().join("palworld_backup_f1_test").join("SaveGames");
+        let base = std::env::temp_dir()
+            .join("palworld_backup_f1_test")
+            .join("SaveGames");
         let _ = std::fs::remove_dir_all(base.parent().unwrap());
         let world = base.join("0");
         std::fs::create_dir_all(&world).unwrap();
@@ -941,7 +1105,8 @@ mod tests {
         let res = backup_world(
             world.to_string_lossy().to_string(),
             Some(dest.to_string_lossy().to_string()),
-        ).await;
+        )
+        .await;
         assert!(
             res.is_ok(),
             "备份到已存在的自定义目录应成功，实际错误: {:?}",
@@ -961,6 +1126,18 @@ mod tests {
             }
         }
         assert!(found, "dest/0/<timestamp>/ 下应含 Level.sav");
+        let second = backup_world(
+            world.to_string_lossy().to_string(),
+            Some(dest.to_string_lossy().to_string()),
+        )
+        .await
+        .expect("相同世界再次备份应复用已有快照");
+        assert!(second.contains("已存在相同世界备份"));
+        assert_eq!(
+            std::fs::read_dir(&world_back).unwrap().flatten().count(),
+            1,
+            "同名世界内容未变化时不得重复创建备份目录"
+        );
         let _ = std::fs::remove_dir_all(base.parent().unwrap());
     }
 }

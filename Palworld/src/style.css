@@ -620,3 +620,45 @@ html, body {
   background: rgba(116, 88, 72, 0.28); border-radius: 4px;
 }
 .screen::-webkit-scrollbar-thumb:hover { background: rgba(116, 88, 72, 0.42); }
+
+/* 窄桌面窗口：保留导航图标，把内容宽度让给工作区。 */
+@media (max-width: 960px) {
+  .sidebar {
+    width: 64px;
+    flex-basis: 64px;
+    padding: 12px 8px;
+  }
+  .sidebar .status-card {
+    justify-content: center;
+    padding: 10px 6px;
+  }
+  .sidebar .status-text,
+  .sidebar .sidebar-stats,
+  .sidebar .nav-label,
+  .sidebar .nav-item-label,
+  .sidebar .nav-version {
+    display: none;
+  }
+  .sidebar .nav-item {
+    justify-content: center;
+    padding: 0;
+  }
+  .screen {
+    padding: 20px 20px 24px;
+  }
+}
+
+@media (max-width: 720px) {
+  .screen {
+    padding: 16px 14px 20px;
+    gap: 14px;
+  }
+  .page-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .page-actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+}

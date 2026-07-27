@@ -150,11 +150,15 @@ impl<T> ResultBuilder<T> for Result<T, ErrorBuilder> {
     fn message<F: FnOnce(Option<&str>) -> String>(self, _msg: F) -> Self {
         match self {
             Ok(v) => Ok(v),
-            Err(e) => Err(ErrorBuilder {
-                #[cfg(feature = "verbose_errors")]
-                message: Some(_msg(e.message.as_deref())),
-                ..e
-            }),
+            Err(e) => {
+                #[cfg(not(feature = "verbose_errors"))]
+                let _ = &e;
+                Err(ErrorBuilder {
+                    #[cfg(feature = "verbose_errors")]
+                    message: Some(_msg(e.message.as_deref())),
+                    ..e
+                })
+            }
         }
     }
 

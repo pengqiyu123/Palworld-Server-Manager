@@ -7,7 +7,9 @@
 use std::time::Duration;
 use tauri::Manager;
 use windows::Win32::Foundation::HWND;
-use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITOR_DEFAULTTONEAREST, MONITORINFO};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, GetWindowRect, MoveWindow, SetForegroundWindow, ShowWindow, SM_CXSCREEN,
     SM_CYSCREEN, SW_RESTORE,

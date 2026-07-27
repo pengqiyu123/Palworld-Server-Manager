@@ -3,39 +3,39 @@
 //! 当单机存档迁移到专用服务器后，原单机主机的角色 UID 需要与原专用服中
 //! 新角色的 UID 做**对称交换**，专用服才能正确识别两玩家的公会 / 帕鲁 / 建筑等引用。
 //!
-//! 本实现严格对齐参考 `PalworldSaveTools::fix_host_save.py::combined_task` 的语义：
-//!   1. `Level.sav` 同时含 old / new 两个 GUID，做 **3-pass 双向交换**（`sav_io::swap_guids`，
-//!      old→TEMP→new→old，避免单缓冲双 GUID 互相污染）。
-//!   2. 两个 `Players/<guid>.sav` 各自**单向交换**（old 文件 old→new；new 文件 new→old）。
-//!   3. `_dps.sav`（每个玩家一个）：交换 `OwnerPlayerUId`（UID 字面量），并**显式赋值**
+//! 本实现对齐参考工具 Fix Host 的结果语义：
+//!   1. 结构化解析 `Level.sav`，交换 GVAS Guid、角色 RawData 和公会 RawData 中的身份引用。
+//!   2. 两个 `Players/<guid>.sav` 分别结构化改写内部 UID。
+//!   3. `_dps.sav`（每个玩家一个）：设置 `OwnerPlayerUId`，并**显式赋值**
 //!      `SlotId.ContainerId.ID = 对方玩家的 PalStorageContainerId`（容器 ID 不是 UID，
-//!      不能互换，须按参考 `copy_dps_file` 设值）。gvas 解析失败（R-GVAS-1）时
-//!      降级为仅做 `OwnerPlayerUId` 字节交换（R-DPS-1）。
+//!      不能互换，须按参考 `copy_dps_file` 设值）。解析失败时中止，不做裸字节降级。
 //!   4. **最后交换文件名** `<old>.sav ↔ <new>.sav`（`<old>_dps.sav ↔ <new>_dps.sav` 由
 //!      第 3 步直接写入对端文件名完成），保证「文件名 = 身份」一致。
 //!   5. 回写经现有 `sav_io::SavFile::save()`（PlM 自动降级 PLZ），并回读校验。
-//!
-//! 为什么用字节级双向交换而非逐字段：参考靠完整自定义属性 schema 才能逐字段解析公会 /
-//! 角色 RawData；我们 `gvas` crate 未必完整覆盖嵌套 RawData（见 R-GVAS-1）。UID 在 GVAS
-//! 中均以 16 字节字面量出现，**字节级双向交换 + 文件名交换 + `_dps` 容器 ID 显式赋值**
-//! 能产生与参考完全相同的最终状态，且对解析器差异免疫。
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use gvas::properties::Property;
+use gvas::properties::array_property::ArrayProperty;
+use gvas::properties::map_property::MapProperty;
 use gvas::properties::struct_property::StructPropertyValue;
+use gvas::properties::Property;
+use gvas::types::map::HashableIndexMap;
 use gvas::types::Guid;
 use gvas::GvasFile;
 
-use crate::save_edit::models::FixHostRequest;
+use crate::save_edit::models::{FixHostRequest, UidMapping};
 use crate::save_edit::path_util;
 use crate::save_edit::sav_io::{self, SavFile};
+#[cfg(test)]
+use crate::save_edit::world_copy;
 
 /// 为 `_dps` 临时目录生成唯一序号（避免并发测试互相覆盖）。
 static DPS_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// 判断原始字节是否包含某 GUID 的 16 字节。
+#[cfg(test)]
 fn contains_guid(raw: &[u8], g: &[u8; 16]) -> bool {
     let mut i = 0;
     let n = raw.len();
@@ -48,14 +48,11 @@ fn contains_guid(raw: &[u8], g: &[u8; 16]) -> bool {
     false
 }
 
-/// 把 16 字节 GUID 格式化为 32 位大写十六进制串（与磁盘文件名一致，
-/// 匹配参考 `old_guid.replace('-', '').upper()`）。
-fn guid_to_stem(bytes: &[u8; 16]) -> String {
-    let mut s = String::with_capacity(32);
-    for b in bytes {
-        s.push_str(&format!("{:02X}", b));
-    }
-    s
+/// 归一化 UID 字符串为磁盘文件名 stem：去连字符/空格、转小写。
+///
+/// Palworld 磁盘文件名使用 registry 32-hex；调用方传入的 UID 已是该格式，直接规范化即可。
+fn normalize_uid(s: &str) -> String {
+    s.replace(['-', ' '], "").to_lowercase()
 }
 
 /// 把 `Property`（须为 `type_name == "Guid"` 的 StructProperty）的值设为 `value`。
@@ -118,7 +115,11 @@ fn extract_player_uids(gvas: &GvasFile) -> (Option<[u8; 16]>, Option<[u8; 16]>) 
 /// 2. `SlotId.ContainerId.ID`（Guid）→ `target_container`（若提供）。
 ///
 /// 返回实际更新的字段数（用于断言 / 调试）。
-fn patch_dps(gvas: &mut GvasFile, target_uid: &[u8; 16], target_container: Option<&[u8; 16]>) -> usize {
+fn patch_dps(
+    gvas: &mut GvasFile,
+    target_uid: &[u8; 16],
+    target_container: Option<&[u8; 16]>,
+) -> usize {
     let mut updated = 0usize;
     if let Some(prop) = sav_io::top_field_mut(gvas, "SaveParameterArray") {
         if let Some(structs) = sav_io::as_struct_array_mut(prop) {
@@ -138,9 +139,13 @@ fn patch_dps(gvas: &mut GvasFile, target_uid: &[u8; 16], target_container: Optio
                                 // SlotId -> ContainerId -> ID (Guid) -> target_container
                                 if let Some(slot) = sav_io::field_mut(inner_map, "SlotId") {
                                     if let Some(slot_csv) = sav_io::struct_value_mut(slot) {
-                                        if let Some(slot_map) = sav_io::custom_fields_mut(slot_csv) {
-                                            if let Some(cid) = sav_io::field_mut(slot_map, "ContainerId") {
-                                                if let Some(cid_csv) = sav_io::struct_value_mut(cid) {
+                                        if let Some(slot_map) = sav_io::custom_fields_mut(slot_csv)
+                                        {
+                                            if let Some(cid) =
+                                                sav_io::field_mut(slot_map, "ContainerId")
+                                            {
+                                                if let Some(cid_csv) = sav_io::struct_value_mut(cid)
+                                                {
                                                     if let Some(cid_map) =
                                                         sav_io::custom_fields_mut(cid_csv)
                                                     {
@@ -174,15 +179,13 @@ fn patch_dps(gvas: &mut GvasFile, target_uid: &[u8; 16], target_container: Optio
 ///
 /// - `src`：原始 `_dps` 文件路径（已拷到临时目录，避免被覆盖）。
 /// - `dst`：目标路径（交换后的文件名）。
-/// - `source_uid` / `target_uid`：`OwnerPlayerUId` 的源 / 目标 16 字节 GUID。
+/// - `target_uid`：写入 `OwnerPlayerUId` 的目标 16 字节 GUID。
 /// - `target_container`：对方玩家的 `PalStorageContainerId`（None 时降级，不设置）。
 ///
-/// 返回 `true` 表示走了降级路径（gvas 解析失败，或无法设置 ContainerId），
-/// 此时仅做 `OwnerPlayerUId` 的字节级交换（R-DPS-1）。
+/// 返回 `true` 表示缺少容器 ID；GVAS 解析失败会直接返回错误。
 fn patch_dps_file(
     src: &Path,
     dst: &Path,
-    source_uid: &[u8; 16],
     target_uid: &[u8; 16],
     target_container: Option<&[u8; 16]>,
 ) -> Result<bool, String> {
@@ -205,20 +208,338 @@ fn patch_dps_file(
             }
             Ok(false)
         }
-        Err(_) => {
-            // R-DPS-1 降级：仅字节级交换 OwnerPlayerUId（source -> target），不动 ContainerId。
-            let mut raw_file = file;
-            raw_file.replace_guid_bytes(source_uid, target_uid);
-            raw_file.save(dst)?;
-            SavFile::load(dst)
-                .map_err(|e| format!("{} _dps 降级写回校验失败: {}", dst.display(), e))?;
-            eprintln!(
-                "[warn] _dps {}: gvas 解析失败，降级为仅 OwnerPlayerUId 字节交换（R-DPS-1）。",
-                dst.display()
-            );
-            Ok(true)
+        Err(e) => Err(format!(
+            "{} _dps 解析失败，已取消身份交换以避免损坏存档: {}",
+            src.display(),
+            e
+        )),
+    }
+}
+
+fn custom_fields_mut(
+    property: &mut Property,
+) -> Option<&mut HashableIndexMap<String, Vec<Property>>> {
+    match property {
+        Property::StructProperty(value) => match &mut value.value {
+            StructPropertyValue::CustomStruct(fields) => Some(fields),
+            _ => None,
+        },
+        Property::StructPropertyValue(StructPropertyValue::CustomStruct(fields)) => Some(fields),
+        _ => None,
+    }
+}
+
+fn rawdata_bytes_mut(property: &mut Property) -> Option<&mut Vec<u8>> {
+    let fields = custom_fields_mut(property)?;
+    match fields.get_mut("RawData")?.first_mut()? {
+        Property::ArrayProperty(ArrayProperty::Bytes { bytes }) => Some(bytes),
+        _ => None,
+    }
+}
+
+fn is_guild_group(property: &Property) -> bool {
+    let fields = match property {
+        Property::StructProperty(value) => match &value.value {
+            StructPropertyValue::CustomStruct(fields) => fields,
+            _ => return false,
+        },
+        Property::StructPropertyValue(StructPropertyValue::CustomStruct(fields)) => fields,
+        _ => return false,
+    };
+    matches!(
+        fields.get("GroupType").and_then(|values| values.first()),
+        Some(Property::EnumProperty(value)) if value.value == "EPalGroupType::Guild"
+    )
+}
+
+struct GuildCursor<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> GuildCursor<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, pos: 0 }
+    }
+
+    fn take(&mut self, len: usize) -> Result<usize, String> {
+        let end = self
+            .pos
+            .checked_add(len)
+            .ok_or_else(|| "公会 RawData 位置溢出".to_string())?;
+        if end > self.bytes.len() {
+            return Err(format!(
+                "公会 RawData 截断: 需要 {} 字节，剩余 {} 字节",
+                len,
+                self.bytes.len().saturating_sub(self.pos)
+            ));
+        }
+        let start = self.pos;
+        self.pos = end;
+        Ok(start)
+    }
+
+    fn i32(&mut self) -> Result<i32, String> {
+        let start = self.take(4)?;
+        Ok(i32::from_le_bytes(
+            self.bytes[start..start + 4].try_into().unwrap(),
+        ))
+    }
+
+    fn count(&mut self, label: &str) -> Result<usize, String> {
+        let count = self.i32()?;
+        if count < 0 {
+            return Err(format!("公会 RawData {label} 数量为负数: {count}"));
+        }
+        let count = count as usize;
+        if count > self.bytes.len().saturating_sub(self.pos) {
+            return Err(format!("公会 RawData {label} 数量异常: {count}"));
+        }
+        Ok(count)
+    }
+
+    fn fstring(&mut self) -> Result<(), String> {
+        let length = self.i32()?;
+        let bytes = if length >= 0 {
+            length as usize
+        } else {
+            (length as i64)
+                .checked_neg()
+                .and_then(|value| value.checked_mul(2))
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or_else(|| "公会 RawData FString 长度溢出".to_string())?
+        };
+        self.take(bytes)?;
+        Ok(())
+    }
+
+    fn guid(&mut self) -> Result<usize, String> {
+        self.take(16)
+    }
+
+    fn guid_at(&self, offset: usize) -> [u8; 16] {
+        self.bytes[offset..offset + 16].try_into().unwrap()
+    }
+
+    fn guid_array(&mut self, label: &str) -> Result<(), String> {
+        let count = self.count(label)?;
+        self.take(
+            count
+                .checked_mul(16)
+                .ok_or_else(|| format!("{label} 长度溢出"))?,
+        )?;
+        Ok(())
+    }
+}
+
+fn add_guid_swap(
+    cursor: &GuildCursor<'_>,
+    offset: usize,
+    old: &[u8; 16],
+    new: &[u8; 16],
+    writes: &mut Vec<(usize, [u8; 16])>,
+) {
+    let value = cursor.guid_at(offset);
+    if value == *old {
+        writes.push((offset, *new));
+    } else if value == *new {
+        writes.push((offset, *old));
+    }
+}
+
+fn parse_guild_player(
+    cursor: &mut GuildCursor<'_>,
+    old: &[u8; 16],
+    new: &[u8; 16],
+    has_role: bool,
+    writes: &mut Vec<(usize, [u8; 16])>,
+) -> Result<(), String> {
+    let uid = cursor.guid()?;
+    add_guid_swap(cursor, uid, old, new, writes);
+    cursor.take(8)?;
+    cursor.fstring()?;
+    if has_role {
+        cursor.take(1)?;
+    }
+    Ok(())
+}
+
+fn parse_guild_tail(
+    bytes: &[u8],
+    start: usize,
+    old: &[u8; 16],
+    new: &[u8; 16],
+    version_two: bool,
+) -> Result<Vec<(usize, [u8; 16])>, String> {
+    let mut cursor = GuildCursor { bytes, pos: start };
+    let mut writes = Vec::new();
+    if version_two {
+        let chest_roles = cursor.count("仓库角色")?;
+        cursor.take(chest_roles)?;
+        cursor.take(4)?;
+    }
+    let admin = cursor.guid()?;
+    add_guid_swap(&cursor, admin, old, new, &mut writes);
+    let players = cursor.count("成员")?;
+    for _ in 0..players {
+        parse_guild_player(&mut cursor, old, new, version_two, &mut writes)?;
+    }
+    if version_two {
+        let role_permissions = cursor.count("角色权限")?;
+        for _ in 0..role_permissions {
+            cursor.take(1)?;
+            let permissions = cursor.count("权限")?;
+            cursor.take(permissions)?;
         }
     }
+    cursor.take(4)?;
+    if cursor.pos != bytes.len() {
+        return Err(format!(
+            "公会 RawData 尾部未完全消费: {} / {}",
+            cursor.pos,
+            bytes.len()
+        ));
+    }
+    Ok(writes)
+}
+
+fn patch_guild_rawdata(
+    bytes: &mut Vec<u8>,
+    old: &[u8; 16],
+    new: &[u8; 16],
+    old_instance: Option<&[u8; 16]>,
+    new_instance: Option<&[u8; 16]>,
+) -> Result<usize, String> {
+    let mut cursor = GuildCursor::new(bytes);
+    let mut writes = Vec::<(usize, [u8; 16])>::new();
+    cursor.guid()?;
+    cursor.fstring()?;
+    let handles = cursor.count("角色句柄")?;
+    for _ in 0..handles {
+        let uid = cursor.guid()?;
+        let instance = cursor.guid()?;
+        let instance_value = cursor.guid_at(instance);
+        if old_instance == Some(&instance_value) {
+            writes.push((uid, *new));
+        } else if new_instance == Some(&instance_value) {
+            writes.push((uid, *old));
+        }
+    }
+    cursor.take(1)?;
+    cursor.take(4)?;
+    cursor.guid_array("据点")?;
+    cursor.take(8)?;
+    cursor.guid_array("据点对象")?;
+    cursor.fstring()?;
+    let last_modifier = cursor.guid()?;
+    add_guid_swap(&cursor, last_modifier, old, new, &mut writes);
+    let markers = cursor.count("公会标记")?;
+    for _ in 0..markers {
+        cursor.guid()?;
+        cursor.take(24)?;
+        cursor.take(4)?;
+        let owner = cursor.guid()?;
+        add_guid_swap(&cursor, owner, old, new, &mut writes);
+    }
+    let tail_start = cursor.pos;
+    let tail_writes = parse_guild_tail(bytes, tail_start, old, new, true)
+        .or_else(|_| parse_guild_tail(bytes, tail_start, old, new, false))?;
+    writes.extend(tail_writes);
+
+    for (offset, value) in &writes {
+        bytes[*offset..*offset + 16].copy_from_slice(value);
+    }
+    Ok(writes.len())
+}
+
+fn patch_cspm_player_keys(
+    entries: &mut HashableIndexMap<Property, Property>,
+    old: &[u8; 16],
+    new: &[u8; 16],
+    old_instance: Option<&[u8; 16]>,
+    new_instance: Option<&[u8; 16]>,
+) -> usize {
+    let original = std::mem::take(&mut entries.0);
+    let mut changed = 0usize;
+    for (mut key, value) in original {
+        if let Some(fields) = custom_fields_mut(&mut key) {
+            let instance = fields
+                .get("InstanceId")
+                .and_then(|values| values.first())
+                .and_then(sav_io::as_guid)
+                .map(|value| value.to_u8());
+            let replacement = if instance.as_ref() == old_instance {
+                Some(new)
+            } else if instance.as_ref() == new_instance {
+                Some(old)
+            } else {
+                None
+            };
+            if let Some(replacement) = replacement {
+                if let Some(player_uid) = fields
+                    .get_mut("PlayerUId")
+                    .and_then(|values| values.first_mut())
+                {
+                    changed += usize::from(set_guid_property(player_uid, replacement));
+                }
+            }
+        }
+        entries.0.insert(key, value);
+    }
+    changed
+}
+
+fn patch_level_identity(
+    level: &SavFile,
+    old: &[u8; 16],
+    new: &[u8; 16],
+    old_instance: Option<&[u8; 16]>,
+    new_instance: Option<&[u8; 16]>,
+) -> Result<(SavFile, usize), String> {
+    let mut gvas = level.parse()?;
+    let custom_versions = gvas.header.get_custom_versions().clone();
+    let mut changed = sav_io::swap_owner_guids_in_gvas(&mut gvas, old, new)?;
+    let world_fields = sav_io::top_field_mut(&mut gvas, "worldSaveData")
+        .and_then(sav_io::struct_value_mut)
+        .and_then(sav_io::custom_fields_mut)
+        .ok_or_else(|| "Level.sav 缺少 worldSaveData".to_string())?;
+
+    if let Some(Property::MapProperty(MapProperty::Properties { value, .. })) = world_fields
+        .get_mut("CharacterSaveParameterMap")
+        .and_then(|values| values.first_mut())
+    {
+        changed += patch_cspm_player_keys(value, old, new, old_instance, new_instance);
+        for (_, entry) in value.0.iter_mut() {
+            if let Some(bytes) = rawdata_bytes_mut(entry) {
+                let (patched, count) = sav_io::swap_owner_guids_in_character_property_stream(
+                    bytes,
+                    &custom_versions,
+                    old,
+                    new,
+                )?;
+                if count > 0 {
+                    *bytes = patched;
+                    changed += count;
+                }
+            }
+        }
+    }
+
+    if let Some(Property::MapProperty(MapProperty::Properties { value, .. })) = world_fields
+        .get_mut("GroupSaveDataMap")
+        .and_then(|values| values.first_mut())
+    {
+        for (_, group) in value.0.iter_mut() {
+            if is_guild_group(group) {
+                let bytes =
+                    rawdata_bytes_mut(group).ok_or_else(|| "公会记录缺少 RawData".to_string())?;
+                changed += patch_guild_rawdata(bytes, old, new, old_instance, new_instance)?;
+            }
+        }
+    }
+
+    let patched = SavFile::from_gvas(&gvas, level.compression)?;
+    Ok((patched, changed))
 }
 
 /// 核心实现：在给定世界数据目录 `data_dir` 内执行双向交换。
@@ -233,6 +554,8 @@ pub(crate) fn fix_host_save_in_dir(
     data_dir: &Path,
     old_bytes: &[u8; 16],
     new_bytes: &[u8; 16],
+    old_uid: &str,
+    new_uid: &str,
 ) -> Result<usize, String> {
     let players_dir = data_dir.join("Players");
     if !players_dir.is_dir() {
@@ -242,8 +565,8 @@ pub(crate) fn fix_host_save_in_dir(
         return Err("旧主机 GUID 与新角色 GUID 相同，无需替换".to_string());
     }
 
-    let old_stem = guid_to_stem(old_bytes);
-    let new_stem = guid_to_stem(new_bytes);
+    let old_stem = normalize_uid(old_uid);
+    let new_stem = normalize_uid(new_uid);
     let old_path = players_dir.join(format!("{}.sav", old_stem));
     let new_path = players_dir.join(format!("{}.sav", new_stem));
     if !old_path.is_file() {
@@ -260,18 +583,17 @@ pub(crate) fn fix_host_save_in_dir(
     let mut changed = 0usize;
     let mut degraded_dps = false;
 
-    // 提取两玩家的 PalStorageContainerId / InstanceId（用于 _dps 赋值 + R-INST-1 防御）。
-    // gvas 解析失败（R-GVAS-1）时降级：容器 ID 取不到 → _dps 仅做 UID 字节交换。
+    // 先完整解析并生成所有核心文件的修改结果；任一解析失败都在写盘前中止。
     let old_sav = SavFile::load(&old_path)?;
     let new_sav = SavFile::load(&new_path)?;
-    let (old_container, old_inst) = match old_sav.parse() {
-        Ok(g) => extract_player_uids(&g),
-        Err(_) => (None, None),
-    };
-    let (new_container, new_inst) = match new_sav.parse() {
-        Ok(g) => extract_player_uids(&g),
-        Err(_) => (None, None),
-    };
+    let old_gvas = old_sav
+        .parse()
+        .map_err(|e| format!("旧主机角色存档解析失败: {e}"))?;
+    let new_gvas = new_sav
+        .parse()
+        .map_err(|e| format!("服务器新角色存档解析失败: {e}"))?;
+    let (old_container, old_inst) = extract_player_uids(&old_gvas);
+    let (new_container, new_inst) = extract_player_uids(&new_gvas);
     // R-INST-1 防御：两角色 InstanceId 不应相同（否则 3-pass 交换会退化）。
     if let (Some(a), Some(b)) = (old_inst, new_inst) {
         if a == b {
@@ -279,34 +601,43 @@ pub(crate) fn fix_host_save_in_dir(
         }
     }
 
-    // (a) Level.sav：3-pass 双向交换（同时含 old/new 两个 GUID）。
-    {
-        let mut level = SavFile::load(&level_path)?;
-        sav_io::swap_guids(&mut level.raw, old_bytes, new_bytes)
-            .map_err(|e| format!("Level.sav 双向交换失败: {}", e))?;
-        level.save(&level_path)?;
-        SavFile::load(&level_path)
-            .map_err(|e| format!("Level.sav 写回校验失败: {}", e))?;
-        changed += 1;
+    let level = SavFile::load(&level_path)?;
+    let (patched_level, level_guid_changes) = patch_level_identity(
+        &level,
+        old_bytes,
+        new_bytes,
+        old_inst.as_ref(),
+        new_inst.as_ref(),
+    )?;
+    if level_guid_changes == 0 {
+        return Err("Level.sav 中未找到待交换的角色引用，已取消操作".to_string());
+    }
+    let mut patched_old = SavFile {
+        raw: old_sav.raw.clone(),
+        compression: old_sav.compression,
+    };
+    let old_changes = patched_old.replace_guid_structured(old_bytes, new_bytes)?;
+    if old_changes == 0 {
+        return Err("旧主机角色存档中未找到原角色 UID，已取消操作".to_string());
+    }
+    let mut patched_new = SavFile {
+        raw: new_sav.raw.clone(),
+        compression: new_sav.compression,
+    };
+    let new_changes = patched_new.replace_guid_structured(new_bytes, old_bytes)?;
+    if new_changes == 0 {
+        return Err("服务器新角色存档中未找到新角色 UID，已取消操作".to_string());
     }
 
-    // (b) 两个 player 文件：单向交换（old 文件 old→new；new 文件 new→old）。
-    {
-        let mut old_file = SavFile::load(&old_path)?;
-        old_file.replace_guid_bytes(old_bytes, new_bytes);
-        old_file.save(&old_path)?;
-        SavFile::load(&old_path)
-            .map_err(|e| format!("旧主机存档写回校验失败: {}", e))?;
-        changed += 1;
-    }
-    {
-        let mut new_file = SavFile::load(&new_path)?;
-        new_file.replace_guid_bytes(new_bytes, old_bytes);
-        new_file.save(&new_path)?;
-        SavFile::load(&new_path)
-            .map_err(|e| format!("新角色存档写回校验失败: {}", e))?;
-        changed += 1;
-    }
+    patched_level.save(&level_path)?;
+    SavFile::load(&level_path).map_err(|e| format!("Level.sav 写回校验失败: {e}"))?;
+    changed += 1;
+    patched_old.save(&old_path)?;
+    SavFile::load(&old_path).map_err(|e| format!("旧主机存档写回校验失败: {e}"))?;
+    changed += 1;
+    patched_new.save(&new_path)?;
+    SavFile::load(&new_path).map_err(|e| format!("新角色存档写回校验失败: {e}"))?;
+    changed += 1;
 
     // (c) _dps.sav：交换 OwnerPlayerUId + 显式设 ContainerId.ID = 对方 PalStorageContainerId。
     //     先把两个原始 _dps 拷到临时目录，避免「写 new_dps 时覆盖未读的 old_dps」。
@@ -330,8 +661,12 @@ pub(crate) fn fix_host_save_in_dir(
     }
     // old_dps 内容 → 写入 new_dps_path（OwnerPlayerUId=old→new，ContainerId=new_container）
     if old_dps_tmp.is_file() {
-        let deg =
-            patch_dps_file(&old_dps_tmp, &new_dps_path, old_bytes, new_bytes, new_container.as_ref())?;
+        let deg = patch_dps_file(
+            &old_dps_tmp,
+            &new_dps_path,
+            new_bytes,
+            new_container.as_ref(),
+        )?;
         if deg {
             degraded_dps = true;
         }
@@ -339,8 +674,12 @@ pub(crate) fn fix_host_save_in_dir(
     }
     // new_dps 内容 → 写入 old_dps_path（OwnerPlayerUId=new→old，ContainerId=old_container）
     if new_dps_tmp.is_file() {
-        let deg =
-            patch_dps_file(&new_dps_tmp, &old_dps_path, new_bytes, old_bytes, old_container.as_ref())?;
+        let deg = patch_dps_file(
+            &new_dps_tmp,
+            &old_dps_path,
+            old_bytes,
+            old_container.as_ref(),
+        )?;
         if deg {
             degraded_dps = true;
         }
@@ -362,8 +701,8 @@ pub(crate) fn fix_host_save_in_dir(
 
     if degraded_dps {
         eprintln!(
-            "[warn] fix_host: 至少一个 _dps.sav 走了降级路径（gvas 解析失败或缺少 \
-             PalStorageContainerId），仅做了 OwnerPlayerUId 字节交换，未设置 ContainerId.ID；\
+            "[warn] fix_host: 至少一个 _dps.sav 缺少 PalStorageContainerId，\
+             OwnerPlayerUId 已更新，但未设置 ContainerId.ID；\
              该玩家的帕鲁箱归属可能需手动整理（R-DPS-1）。"
         );
     }
@@ -377,11 +716,18 @@ pub(crate) fn fix_host_save_in_dir(
 /// `new_char_guid` 为两个角色存档文件名（去 `.sav`，可为带连字符的标准 GUID 形式）。
 ///
 /// 返回被成功改写并写回的 `.sav` 文件数。
+#[allow(dead_code)] // Legacy direct entrypoint retained for save-format diagnostics.
 pub fn fix_host_save_impl(req: &FixHostRequest) -> Result<usize, String> {
     let data_dir = path_util::world_data_dir(&req.world)?;
     let old_bytes = sav_io::guid_bytes(&req.old_host_guid)?;
     let new_bytes = sav_io::guid_bytes(&req.new_char_guid)?;
-    fix_host_save_in_dir(&data_dir, &old_bytes, &new_bytes)
+    fix_host_save_in_dir(
+        &data_dir,
+        &old_bytes,
+        &new_bytes,
+        &req.old_host_guid,
+        &req.new_char_guid,
+    )
 }
 
 /// 供 `transfer.rs` 复用：对单个 `.sav` 文件做 GUID 单向替换并写回（带回读校验）。
@@ -392,6 +738,49 @@ pub(crate) fn swap_guid_in_file(path: &Path, old: &[u8; 16], new: &[u8; 16]) -> 
     file.save(path)?;
     SavFile::load(path).map_err(|e| format!("写回后校验失败 {}: {}", path.display(), e))?;
     Ok(())
+}
+
+// === 阶段 B / C 实现（v2 三阶段迁移：角色替换 + 公会绑定） ===
+
+/// 阶段 B/C：按参考工具的 Fix Host 语义交换同一世界中的两位玩家身份。
+///
+/// Phase A 把单机世界搬到专用服后，玩家首次进入服务器会生成 `new_uid`。此时不能
+/// 删除该角色并做 `old -> new` 单向替换：CSPM、`Players/` 和公会 RawData 会失去
+/// 成对身份。正确做法是对每对 `(old_uid, new_uid)` 执行对称交换，保留两个 CSPM
+/// 条目和两个玩家文件，再把原单机角色绑定到服务器 UID。
+///
+/// 所有映射必须互不重叠。映射链或重复目标会使两次交换相互覆盖，直接拒绝而不写盘。
+pub fn fix_host_save_multi(data_dir: &Path, mappings: &[UidMapping]) -> Result<usize, String> {
+    if mappings.is_empty() {
+        return Err("请选择一对要交换身份的角色".to_string());
+    }
+
+    let mut seen = HashSet::new();
+    let mut resolved = Vec::with_capacity(mappings.len());
+    for mapping in mappings {
+        let old_stem = normalize_uid(&mapping.old_uid);
+        let new_stem = normalize_uid(&mapping.new_uid);
+        let old_bytes = sav_io::guid_bytes(&mapping.old_uid)?;
+        let new_bytes = sav_io::guid_bytes(&mapping.new_uid)?;
+        if old_bytes == new_bytes {
+            return Err(format!("角色 UID 相同，无需交换: {}", mapping.old_uid));
+        }
+        if !seen.insert(old_stem.clone()) || !seen.insert(new_stem.clone()) {
+            return Err("角色 UID 映射存在重复或链式覆盖，无法安全交换".to_string());
+        }
+        resolved.push((
+            old_bytes,
+            new_bytes,
+            mapping.old_uid.as_str(),
+            mapping.new_uid.as_str(),
+        ));
+    }
+
+    let mut changed = 0usize;
+    for (old_bytes, new_bytes, old_uid, new_uid) in resolved {
+        changed += fix_host_save_in_dir(data_dir, &old_bytes, &new_bytes, old_uid, new_uid)?;
+    }
+    Ok(changed)
 }
 
 // ===========================================================================
@@ -411,54 +800,89 @@ mod tests {
     use gvas::engine_version::FEngineVersion;
     use gvas::game_version::DeserializedGameVersion;
     use gvas::properties::array_property::ArrayProperty;
+    use gvas::properties::int_property::IntProperty;
+    use gvas::properties::map_property::MapProperty;
     use gvas::properties::struct_property::{StructProperty, StructPropertyValue};
+    use gvas::properties::Property;
     use gvas::types::map::HashableIndexMap;
+    use gvas::types::Guid;
     use gvas::GvasFile;
     use gvas::GvasHeader;
 
-    /// 老板真实样本目录（Windows 绝对路径，Rust std 接受正斜杠）。
-    const SAMPLE_DIR: &str = "F:/1/0/20260723-235259/1A91A61548C7B6FD7B58B2B70710F7EE";
-
-    /// 样本目录是否存在；不存在时测试自动跳过。
-    fn sample_dir() -> Option<PathBuf> {
-        let p = PathBuf::from(SAMPLE_DIR);
-        if p.is_dir() {
-            Some(p)
-        } else {
-            eprintln!("[skip] 真实样本目录不存在，跳过样本测试: {}", SAMPLE_DIR);
-            None
-        }
-    }
-
-    /// 把真实样本整包拷到临时随机子目录（避免改动原始样本）。
-    fn copy_sample_to_temp() -> Option<PathBuf> {
-        let src = sample_dir()?;
-        let dst = std::env::temp_dir().join(format!(
-            "palworld_fixhost_test_{}_{}",
-            std::process::id(),
-            DPS_TMP_SEQ.fetch_add(1, Ordering::SeqCst)
-        ));
-        let _ = std::fs::remove_dir_all(&dst);
-        let mut n = 0usize;
-        crate::save_edit::path_util::copy_dir_recursive(&src, &dst, &mut n).ok()?;
-        Some(dst)
-    }
-
-    /// 单向 16 字节 GUID 替换（用于测试期望值的本地对拍，逻辑同 `SavFile::replace_guid_bytes`）。
-    fn replace_guid_bytes_local(raw: &mut Vec<u8>, old: &[u8; 16], new: &[u8; 16]) {
-        if old == new {
+    /// 真实 Level.sav 必须能经项目 hint 表解析并逐字节无损重序列化。
+    #[test]
+    fn gvas_roundtrip_lossless_probe_real() {
+        let src = PathBuf::from(
+            "E:/SteamLibrary/steamapps/common/PalServer/Pal/Saved/SaveGames/\
+             _migration_backups/f5_1785081805544967700_2204/0/\
+             1A91A61548C7B6FD7B58B2B70710F7EE",
+        );
+        if !src.is_dir() {
+            eprintln!("[skip] 真实 E: 服务器世界不存在，跳过: {}", src.display());
             return;
         }
-        let mut i = 0;
-        let n = raw.len();
-        while i + 16 <= n {
-            if raw[i..i + 16] == *old {
-                raw[i..i + 16].copy_from_slice(new);
-                i += 16;
-            } else {
-                i += 1;
+        let level_path = src.join("Level.sav");
+        let original = SavFile::load(&level_path).expect("load Level");
+        let parsed = original.parse().expect("parse Level with Palworld hints");
+        let serialized =
+            SavFile::from_gvas(&parsed, original.compression).expect("serialize Level");
+        assert_eq!(serialized.raw, original.raw, "GVAS 往返必须逐字节无损");
+        serialized.parse().expect("re-parse 应成功");
+        println!("[ok] gvas 往返无损: {} 字节", original.raw.len());
+    }
+
+    /// 对存档数据中的角色做实战分析：用项目自带的 `Level.sav` 权威解析
+    /// （`read_players_from_level` → `f5_world_summary_by_path_impl`）列出源/目标存档里的
+    /// 全部角色与公会，等价于视频攻略里「角色转移」工具打开两个 Level.sav 后展示的列表。
+    #[test]
+    fn analyze_characters_source_and_target() {
+        let source = "C:/Users/pengq/AppData/Local/Pal/Saved/SaveGames/76561199381352956/1D5D1F304D3AA1FE2818BA98D5223DFE";
+        let target = "E:/SteamLibrary/steamapps/common/PalServer/Pal/Saved/SaveGames/0/1A91A61548C7B6FD7B58B2B70710F7EE";
+
+        eprintln!(
+            "\n================ 源存档（本地单机）{} ================",
+            source
+        );
+        match world_copy::f5_world_summary_by_path_impl(source) {
+            Ok(s) => {
+                eprintln!("  角色数: {}", s.players.len());
+                for p in &s.players {
+                    eprintln!(
+                        "  - 昵称={} | 等级={} | PlayerUId={} | InstanceId={} | GUID={}",
+                        p.nickname, p.level, p.player_uid, p.instance_id, p.guid
+                    );
+                }
+                eprintln!("  公会数: {}", s.guilds.len());
+                for g in &s.guilds {
+                    eprintln!("  - 公会 id={} | name={:?}", g.guild_id, g.name);
+                }
+                assert!(!s.players.is_empty(), "源存档应解析出至少 1 个角色");
             }
+            Err(e) => panic!("源存档解析失败: {}", e),
         }
+
+        eprintln!(
+            "\n================ 目标存档（专用服务器）{} ================",
+            target
+        );
+        match world_copy::f5_world_summary_by_path_impl(target) {
+            Ok(s) => {
+                eprintln!("  角色数: {}", s.players.len());
+                for p in &s.players {
+                    eprintln!(
+                        "  - 昵称={} | 等级={} | PlayerUId={} | InstanceId={} | GUID={}",
+                        p.nickname, p.level, p.player_uid, p.instance_id, p.guid
+                    );
+                }
+                eprintln!("  公会数: {}", s.guilds.len());
+                for g in &s.guilds {
+                    eprintln!("  - 公会 id={} | name={:?}", g.guild_id, g.name);
+                }
+                assert!(!s.players.is_empty(), "目标存档应解析出至少 1 个角色");
+            }
+            Err(e) => panic!("目标存档解析失败: {}", e),
+        }
+        eprintln!("\n================ 分析结束 ================\n");
     }
 
     #[test]
@@ -565,10 +989,7 @@ mod tests {
         );
 
         // 回读校验
-        let arr_prop = gvas
-            .properties
-            .get("SaveParameterArray")
-            .unwrap();
+        let arr_prop = gvas.properties.get("SaveParameterArray").unwrap();
         if let Property::ArrayProperty(ArrayProperty::Structs { structs, .. }) = arr_prop {
             let spv = &structs[0];
             if let StructPropertyValue::CustomStruct(map) = spv {
@@ -607,109 +1028,639 @@ mod tests {
         }
     }
 
-    /// 真实样本双向交换验收：文件名交换 / Level 3-pass 对拍 / 回读无损坏。
+    fn push_i32(bytes: &mut Vec<u8>, value: i32) {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_guid(bytes: &mut Vec<u8>, value: &[u8; 16]) -> usize {
+        let offset = bytes.len();
+        bytes.extend_from_slice(value);
+        offset
+    }
+
+    fn guid_at(bytes: &[u8], offset: usize) -> [u8; 16] {
+        bytes[offset..offset + 16].try_into().unwrap()
+    }
+
     #[test]
-    fn real_sample_fix_host_swaps_and_verifies() {
-        let Some(work) = copy_sample_to_temp() else {
+    fn phase_c_swaps_guild_admin_members_handles_and_marker_owners() {
+        let old = [0x11; 16];
+        let new = [0x22; 16];
+        let old_instance = [0xA1; 16];
+        let new_instance = [0xB2; 16];
+        let guild_id = [0x33; 16];
+        let marker_id = [0x44; 16];
+        let mut raw = Vec::new();
+
+        push_guid(&mut raw, &guild_id);
+        push_i32(&mut raw, 0); // guild name
+        push_i32(&mut raw, 2); // character handles
+        let old_handle_uid = push_guid(&mut raw, &old);
+        push_guid(&mut raw, &old_instance);
+        let new_handle_uid = push_guid(&mut raw, &new);
+        push_guid(&mut raw, &new_instance);
+        raw.push(0); // base camp worker map flag
+        push_i32(&mut raw, 0);
+        push_i32(&mut raw, 0); // base ids
+        raw.extend_from_slice(&[0; 8]);
+        push_i32(&mut raw, 0); // base object ids
+        push_i32(&mut raw, 0); // guild name 2
+        let last_modifier = push_guid(&mut raw, &old);
+        push_i32(&mut raw, 1); // map markers
+        push_guid(&mut raw, &marker_id);
+        raw.extend_from_slice(&[0; 24]);
+        push_i32(&mut raw, 0);
+        let marker_owner = push_guid(&mut raw, &new);
+        let administrator = push_guid(&mut raw, &old);
+        push_i32(&mut raw, 2); // members
+        let old_member = push_guid(&mut raw, &old);
+        raw.extend_from_slice(&[0; 8]);
+        push_i32(&mut raw, 0);
+        let new_member = push_guid(&mut raw, &new);
+        raw.extend_from_slice(&[0; 8]);
+        push_i32(&mut raw, 0);
+        push_i32(&mut raw, 0); // trailing unknown
+
+        let changed = patch_guild_rawdata(
+            &mut raw,
+            &old,
+            &new,
+            Some(&old_instance),
+            Some(&new_instance),
+        )
+        .expect("公会 RawData 应可解析并交换身份");
+
+        assert_eq!(changed, 7);
+        assert_eq!(guid_at(&raw, old_handle_uid), new);
+        assert_eq!(guid_at(&raw, new_handle_uid), old);
+        assert_eq!(guid_at(&raw, last_modifier), new);
+        assert_eq!(guid_at(&raw, marker_owner), old);
+        assert_eq!(guid_at(&raw, administrator), new);
+        assert_eq!(guid_at(&raw, old_member), new);
+        assert_eq!(guid_at(&raw, new_member), old);
+    }
+
+    // ---- 阶段 B / C 纯函数与真实样本测试 ----
+
+    /// 实践检验（真实存档数据）：把真实 E: 服务器世界 1A91A615 拷到临时副本，
+    /// 跑完整 Phase B+C，断言 煜 继承到 4E239D4F、公会重绑。仅作用于副本，真实 E: 存档不动。
+    #[test]
+    fn practice_migration_on_live_copy() {
+        let src = PathBuf::from(
+            "E:/SteamLibrary/steamapps/common/PalServer/Pal/Saved/SaveGames/\
+             _migration_backups/f5_1785081805544967700_2204/0/\
+             1A91A61548C7B6FD7B58B2B70710F7EE",
+        );
+        if !src.is_dir() {
+            eprintln!("[skip] 真实 E: 服务器世界不存在，跳过: {}", src.display());
             return;
-        };
-        // 选两个真实玩家 GUID（来自 Players/ 文件名，磁盘序 32 位小写十六进制）。
-        let old_guid = "3F5D130B000000000000000000000000";
-        let new_guid = "4E239D4F000000000000000000000000";
+        }
+        let work = std::env::temp_dir().join(format!(
+            "palworld_live_practice_{}_{}",
+            std::process::id(),
+            DPS_TMP_SEQ.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&work);
+        let mut n = 0usize;
+        crate::save_edit::path_util::copy_dir_recursive(&src, &work, &mut n)
+            .expect("拷贝真实世界到临时副本");
+
         let players = work.join("Players");
-        let old_path = players.join(format!("{}.sav", old_guid.to_uppercase()));
-        let new_path = players.join(format!("{}.sav", new_guid.to_uppercase()));
-        assert!(old_path.is_file(), "old 玩家存档应存在");
-        assert!(new_path.is_file(), "new 玩家存档应存在");
+        let old_disk = "00000000000000000000000000000001";
+        let new_disk = "4E239D4F000000000000000000000000";
+        let old_path = players.join(format!("{}.sav", old_disk));
+        let new_path = players.join(format!("{}.sav", new_disk));
+        assert!(old_path.is_file(), "真实存档应有 old 角色文件");
+        assert!(new_path.is_file(), "真实存档应有 new(煜2)角色文件");
 
-        let old_bytes = sav_io::guid_bytes(old_guid).expect("解析 old GUID");
-        let new_bytes = sav_io::guid_bytes(new_guid).expect("解析 new GUID");
-
-        // 记录交换前原始字节（事后对拍，证明 swap 与参考一致）。
         let level_path = work.join("Level.sav");
-        let old_pre = SavFile::load(&old_path).expect("读 old").raw.clone();
-        let new_pre = SavFile::load(&new_path).expect("读 new").raw.clone();
-        let level_pre = SavFile::load(&level_path).expect("读 Level").raw.clone();
-        let level_old_count_pre = level_pre.windows(16).filter(|w| *w == &old_bytes).count();
-        let level_new_count_pre = level_pre.windows(16).filter(|w| *w == &new_bytes).count();
+        let old_bytes = sav_io::guid_bytes(old_disk).expect("old guid");
 
-        // 执行双向交换。
-        let changed = fix_host_save_in_dir(&work, &old_bytes, &new_bytes)
-            .expect("fix_host_save_in_dir 应成功");
-        assert!(changed >= 3, "至少 Level + 两个 player 文件应被改写，实际 {changed}");
-
-        // (1) 文件名交换：OLD.sav 现包含（原 new 内容，new→old）；NEW.sav 现包含（原 old 内容，old→new）。
-        let old_post = SavFile::load(&old_path).expect("OLD.sav 应仍在").raw;
-        let new_post = SavFile::load(&new_path).expect("NEW.sav 应仍在").raw;
-        let mut expect_old = new_pre.clone();
-        replace_guid_bytes_local(&mut expect_old, &new_bytes, &old_bytes);
-        assert_eq!(old_post, expect_old, "OLD.sav 应等于（原 new 内容，new→old 替换）");
-        let mut expect_new = old_pre.clone();
-        replace_guid_bytes_local(&mut expect_new, &old_bytes, &new_bytes);
-        assert_eq!(new_post, expect_new, "NEW.sav 应等于（原 old 内容，old→new 替换）");
-
-        // (2) Level.sav 3-pass 双向交换：old/new 出现次数互换，且与 swap_guids 结果逐字节一致。
-        let level_post = SavFile::load(&level_path).expect("Level.sav 应可重新解压").raw;
-        let level_old_count_post = level_post.windows(16).filter(|w| *w == &old_bytes).count();
-        let level_new_count_post = level_post.windows(16).filter(|w| *w == &new_bytes).count();
-        assert_eq!(
-            level_old_count_post, level_new_count_pre,
-            "Level 中 old 出现次数应 = 交换前 new 的次数"
-        );
-        assert_eq!(
-            level_new_count_post, level_old_count_pre,
-            "Level 中 new 出现次数应 = 交换前 old 的次数"
-        );
-        let mut expect_level = level_pre.clone();
-        sav_io::swap_guids(&mut expect_level, &old_bytes, &new_bytes).expect("swap_guids");
-        assert_eq!(
-            level_post, expect_level,
-            "Level.sav 应与 3-pass swap_guids 结果逐字节一致"
+        // 迁移前：Level.sav 原始字节含 old UID 引用；f5 摘要含 煜。
+        let level_raw_pre = SavFile::load(&level_path).expect("读 Level").raw;
+        assert!(!level_raw_pre.is_empty(), "迁移前 Level.sav 不应为空");
+        let pre =
+            world_copy::f5_world_summary_by_path_impl(work.to_str().unwrap()).expect("迁移前摘要");
+        assert!(
+            pre.players.iter().any(|p| p.nickname == "煜"),
+            "迁移前 煜 应存在"
         );
 
-        // (3) 回读校验：所有 .sav（含 LevelMeta）必须可解压，无损坏。
-        for name in ["Level.sav", "LevelMeta.sav"] {
-            let p = work.join(name);
-            if p.is_file() {
-                SavFile::load(&p).unwrap_or_else(|e| panic!("{} 写回后无法解压: {}", name, e));
-            }
-        }
-        for entry in std::fs::read_dir(&players).expect("读 Players") {
-            let p = entry.expect("entry").path();
-            if p.extension().map_or(false, |x| x == "sav") {
-                SavFile::load(&p).unwrap_or_else(|e| panic!("{} 写回后无法解压: {}", p.display(), e));
-            }
-        }
+        // 执行同一世界内的角色与公会身份交换。
+        let mappings = vec![UidMapping {
+            old_uid: old_disk.to_string(),
+            new_uid: new_disk.to_string(),
+        }];
+        let changed = fix_host_save_multi(&work, &mappings).expect("Phase B/C 应成功");
 
-        // (4) 若样本含 _dps.sav，断言其被处理（交换文件名 / 容器 ID 赋值或降级）；本样本无 _dps，跳过。
-        let has_dps = old_dps_path(&players, old_guid).is_file()
-            || old_dps_path(&players, new_guid).is_file();
-        if !has_dps {
-            println!("[ok] 样本无 _dps.sav，跳过容器 ID 断言（由 patch_dps 单测覆盖）");
-        } else {
-            // 存在 _dps 时，交换后文件名也应互换：old_dps 内容落在 new_dps 文件名，反之亦然。
-            let new_dps_now = old_dps_path(&players, new_guid);
-            let old_dps_now = old_dps_path(&players, old_guid);
-            assert!(
-                new_dps_now.is_file() && old_dps_now.is_file(),
-                "_dps 文件名交换后应两文件均存在"
-            );
-        }
+        // 两个玩家文件和两条角色记录都保留，只交换身份。
+        assert!(old_path.is_file(), "交换后 old 玩家文件仍应存在");
+        assert!(new_path.is_file(), "交换后 new 玩家文件仍应存在");
+        let post =
+            world_copy::f5_world_summary_by_path_impl(work.to_str().unwrap()).expect("迁移后摘要");
+        let yu = post
+            .players
+            .iter()
+            .find(|p| p.nickname == "煜")
+            .expect("迁移后 煜 应仍在");
+        let yu2 = post
+            .players
+            .iter()
+            .find(|p| p.nickname == "煜2")
+            .expect("迁移后 煜2 应仍在");
+        assert_eq!(
+            world_copy::guid_std(&sav_io::guid_bytes(&yu.player_uid).unwrap()),
+            new_disk
+        );
+        assert_eq!(
+            world_copy::guid_std(&sav_io::guid_bytes(&yu2.player_uid).unwrap()),
+            old_disk
+        );
 
-        // 清理临时样本副本（绝不改动原始样本）。
+        // 原单机角色文件现在位于服务器 UID 文件名下，内部不再保留旧 UID。
+        let new_player_gvas = SavFile::load(&new_path)
+            .expect("读新玩家文件")
+            .parse()
+            .expect("解析新玩家文件");
+        assert_eq!(
+            sav_io::count_guid_in_gvas(&new_player_gvas, &old_bytes),
+            0,
+            "迁移后玩家文件不应再含 old UID 的 Guid 属性"
+        );
+
+        SavFile::load(&level_path)
+            .expect("读 Level 后")
+            .parse()
+            .expect("交换后的 Level.sav 必须可完整解析");
+        println!("[ok] 真实存档副本 B/C 身份交换通过：煜→4E239D4F，煜2→0001，改写文件数={changed}");
         let _ = std::fs::remove_dir_all(&work);
     }
 
-    /// 小工具：构造 `<guid>_dps.sav` 路径（与实现中一致）。
-    fn old_dps_path(players: &std::path::Path, guid: &str) -> PathBuf {
-        players.join(format!("{}_dps.sav", guid.to_uppercase()))
+    /// 构造真实 CSPM MapProperty 的一个键值对。
+    ///
+    /// Palworld 的 `CharacterSaveParameterMap` 是
+    /// `MapProperty<StructProperty, StructProperty>`，不是 ArrayProperty；这个夹具必须
+    /// 保持与真实档同形，才能验证 Phase B 的去重逻辑。
+    fn make_cspm_map_entry(puid: Guid, iid: Guid) -> (Property, Property) {
+        let zero = Guid::from_u8([0u8; 16]);
+        let mut key_fields: HashableIndexMap<String, Vec<Property>> = HashableIndexMap::new();
+        key_fields.insert(
+            "PlayerUId".to_string(),
+            vec![Property::StructProperty(StructProperty::new(
+                zero,
+                "Guid".to_string(),
+                StructPropertyValue::Guid(puid),
+            ))],
+        );
+        key_fields.insert(
+            "InstanceId".to_string(),
+            vec![Property::StructProperty(StructProperty::new(
+                zero,
+                "Guid".to_string(),
+                StructPropertyValue::Guid(iid),
+            ))],
+        );
+        (
+            Property::StructPropertyValue(StructPropertyValue::CustomStruct(key_fields)),
+            Property::StructPropertyValue(StructPropertyValue::CustomStruct(
+                HashableIndexMap::new(),
+            )),
+        )
+    }
+
+    /// 构造最小真实形态的 CSPM MapProperty Level.sav。
+    fn make_synthetic_level_with_cspm_map(
+        entries: HashableIndexMap<Property, Property>,
+    ) -> GvasFile {
+        let zero = Guid::from_u8([0u8; 16]);
+        let cspm = Property::MapProperty(MapProperty::new(
+            "StructProperty".to_string(),
+            "StructProperty".to_string(),
+            0,
+            entries,
+        ));
+        let mut wsd_map: HashableIndexMap<String, Vec<Property>> = HashableIndexMap::new();
+        wsd_map.insert("CharacterSaveParameterMap".to_string(), vec![cspm]);
+        let wsd = Property::StructProperty(StructProperty::new(
+            zero,
+            "StructProperty".to_string(),
+            StructPropertyValue::CustomStruct(wsd_map),
+        ));
+        let mut props: HashableIndexMap<String, Property> = HashableIndexMap::new();
+        props.insert("worldSaveData".to_string(), wsd);
+        GvasFile {
+            deserialized_game_version: DeserializedGameVersion::Default,
+            header: GvasHeader::Version2 {
+                package_file_version: 0x20B,
+                engine_version: FEngineVersion::new(5, 0, 0, 0, String::new()),
+                custom_version_format: 3,
+                custom_versions: HashableIndexMap::new(),
+                save_game_class_name: "TestSave".to_string(),
+            },
+            properties: props,
+        }
+    }
+
+    fn map_key_player_instance(key: &Property) -> Option<(Guid, Guid)> {
+        let Property::StructPropertyValue(StructPropertyValue::CustomStruct(fields)) = key else {
+            return None;
+        };
+        let player = fields.get("PlayerUId")?.first().and_then(sav_io::as_guid)?;
+        let instance = fields
+            .get("InstanceId")?
+            .first()
+            .and_then(sav_io::as_guid)?;
+        Some((*player, *instance))
+    }
+
+    fn test_guid_property(value: Guid) -> Property {
+        Property::StructProperty(StructProperty::new(
+            Guid::from_u8([0; 16]),
+            "Guid".to_string(),
+            StructPropertyValue::Guid(value),
+        ))
+    }
+
+    fn map_entry_rawdata_by_instance(
+        map: &HashableIndexMap<Property, Property>,
+        wanted_instance: Guid,
+    ) -> Option<Vec<u8>> {
+        map.iter().find_map(|(key, value)| {
+            let (_, instance) = map_key_player_instance(key)?;
+            if instance != wanted_instance {
+                return None;
+            }
+            let mut value = value.clone();
+            rawdata_bytes_mut(&mut value).cloned()
+        })
+    }
+
+    /// 构造最小可解析的玩家 .sav，包含可供结构化身份交换命中的 PlayerUId。
+    fn make_minimal_player_sav(path: &Path, player_uid: Guid, instance_id: Guid) {
+        let zero = Guid::from_u8([0u8; 16]);
+        let mut individual_id = HashableIndexMap::new();
+        individual_id.insert(
+            "InstanceId".to_string(),
+            vec![test_guid_property(instance_id)],
+        );
+        let mut save_data = HashableIndexMap::new();
+        save_data.insert(
+            "IndividualId".to_string(),
+            vec![Property::StructProperty(StructProperty::new(
+                zero,
+                "StructProperty".to_string(),
+                StructPropertyValue::CustomStruct(individual_id),
+            ))],
+        );
+        let mut props: HashableIndexMap<String, Property> = HashableIndexMap::new();
+        props.insert(
+            "SaveData".to_string(),
+            Property::StructProperty(StructProperty::new(
+                zero,
+                "StructProperty".to_string(),
+                StructPropertyValue::CustomStruct(save_data),
+            )),
+        );
+        props.insert(
+            "PlayerUId".to_string(),
+            Property::StructProperty(StructProperty::new(
+                zero,
+                "Guid".to_string(),
+                StructPropertyValue::Guid(player_uid),
+            )),
+        );
+        props.insert("TestInt".to_string(), IntProperty::new(7).into());
+        let gvas = GvasFile {
+            deserialized_game_version: DeserializedGameVersion::Default,
+            header: GvasHeader::Version2 {
+                package_file_version: 0x20B,
+                engine_version: FEngineVersion::new(5, 0, 0, 0, String::new()),
+                custom_version_format: 3,
+                custom_versions: HashableIndexMap::new(),
+                save_game_class_name: "TestSave".to_string(),
+            },
+            properties: props,
+        };
+        SavFile::from_gvas(&gvas, sav_io::SavCompression::Plz)
+            .expect("构造玩家占位 .sav 应成功")
+            .save(path)
+            .expect("写玩家占位 .sav 应成功");
+    }
+
+    #[test]
+    fn guid_mapping_roundtrips_palworld_disk_uid_word_order() {
+        let uid = "4E239D4F000000000000000000000000";
+        let raw = sav_io::guid_bytes(uid).expect("磁盘 UID 应可解析");
+
+        assert_eq!(
+            &raw[..4],
+            &[0x4F, 0x9D, 0x23, 0x4E],
+            "Palworld FGuid 的每个 u32 以小端存储"
+        );
+        assert_eq!(
+            world_copy::guid_std(&raw),
+            uid,
+            "摘要/UI UID 必须能无损往返为 Players 文件名 UID"
+        );
+
+        let host_uid = "00000000000000000000000000000001";
+        let host_raw = sav_io::guid_bytes(host_uid).expect("单机主机 UID 应可解析");
+        assert_eq!(
+            &host_raw[12..],
+            &[1, 0, 0, 0],
+            "单机主机 UID=FGuid 的第 4 个小端 u32"
+        );
+        assert_eq!(world_copy::guid_std(&host_raw), host_uid);
+    }
+
+    #[test]
+    fn phase_bc_swaps_real_cspm_map_property() {
+        let work = std::env::temp_dir().join(format!(
+            "fixhost_cspm_map_{}_{}",
+            std::process::id(),
+            DPS_TMP_SEQ.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&work);
+        let players = work.join("Players");
+        std::fs::create_dir_all(&players).expect("创建 Players 目录");
+
+        let old_uid = "01000000000000000000000000000000";
+        let new_uid = "02000000000000000000000000000000";
+        let old_guid = Guid::from_u8(sav_io::guid_bytes(old_uid).expect("old UID"));
+        let new_guid = Guid::from_u8(sav_io::guid_bytes(new_uid).expect("new UID"));
+        let source_instance = Guid::from_u8([0xA1; 16]);
+        let target_instance = Guid::from_u8([0xB2; 16]);
+        let mut entries = HashableIndexMap::new();
+        let (source_key, source_value) = make_cspm_map_entry(old_guid, source_instance);
+        let (target_key, target_value) = make_cspm_map_entry(new_guid, target_instance);
+        entries.insert(source_key, source_value);
+        entries.insert(target_key, target_value);
+
+        let level_path = work.join("Level.sav");
+        SavFile::from_gvas(
+            &make_synthetic_level_with_cspm_map(entries),
+            sav_io::SavCompression::Plz,
+        )
+        .expect("构造 CSPM Map Level.sav")
+        .save(&level_path)
+        .expect("写 Level.sav");
+        make_minimal_player_sav(
+            &players.join(format!("{}.sav", normalize_uid(old_uid))),
+            old_guid,
+            source_instance,
+        );
+        make_minimal_player_sav(
+            &players.join(format!("{}.sav", normalize_uid(new_uid))),
+            new_guid,
+            target_instance,
+        );
+
+        fix_host_save_multi(
+            &work,
+            &[UidMapping {
+                old_uid: old_uid.to_string(),
+                new_uid: new_uid.to_string(),
+            }],
+        )
+        .expect("Phase B/C 应支持真实 CSPM MapProperty");
+
+        let gvas = SavFile::load(&level_path)
+            .expect("读 Level")
+            .parse()
+            .expect("解析 Level");
+        let fields = sav_io::top_field(&gvas, "worldSaveData")
+            .and_then(sav_io::struct_value)
+            .and_then(sav_io::custom_fields)
+            .expect("worldSaveData");
+        let cspm = sav_io::field(fields, "CharacterSaveParameterMap").expect("CSPM");
+        let map = world_copy::as_props_map(cspm).expect("CSPM 必须保持 MapProperty");
+        let pairs: Vec<(Guid, Guid)> = map.keys().filter_map(map_key_player_instance).collect();
+        assert!(
+            pairs.contains(&(new_guid, source_instance)),
+            "源角色的 PlayerUId 应交换为 new UID，且保留原 InstanceId"
+        );
+        assert!(
+            pairs.contains(&(old_guid, target_instance)),
+            "目标空角色应保留并交换为 old UID，不能被单向删除"
+        );
+        assert!(
+            players
+                .join(format!("{}.sav", normalize_uid(old_uid)))
+                .is_file()
+                && players
+                    .join(format!("{}.sav", normalize_uid(new_uid)))
+                    .is_file(),
+            "Fix Host 交换后两个玩家文件都必须存在"
+        );
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    #[test]
+    fn phase_bc_preserves_pal_cspm_key_identity() {
+        let root = PathBuf::from(
+            "E:/SteamLibrary/steamapps/common/PalServer/Pal/Saved/SaveGames/\
+             _migration_backups/f5_1785081805544967700_2204/0/\
+             1A91A61548C7B6FD7B58B2B70710F7EE",
+        );
+        if !root.join("Level.sav").is_file() {
+            eprintln!("[skip] 迁移前快照不存在: {}", root.display());
+            return;
+        }
+        let old_uid = "00000000000000000000000000000001";
+        let new_uid = "4E239D4F000000000000000000000000";
+        let old = sav_io::guid_bytes(old_uid).unwrap();
+        let new = sav_io::guid_bytes(new_uid).unwrap();
+        let old_player = SavFile::load(&root.join("Players").join(format!("{old_uid}.sav")))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let new_player = SavFile::load(&root.join("Players").join(format!("{new_uid}.sav")))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let (_, old_instance) = extract_player_uids(&old_player);
+        let (_, new_instance) = extract_player_uids(&new_player);
+        let old_instance = old_instance.expect("source player InstanceId");
+
+        let level = SavFile::load(&root.join("Level.sav")).unwrap();
+        let before = level.parse().unwrap();
+        let before_world = sav_io::top_field(&before, "worldSaveData")
+            .and_then(sav_io::struct_value)
+            .and_then(sav_io::custom_fields)
+            .unwrap();
+        let before_map = world_copy::as_props_map(
+            sav_io::field(before_world, "CharacterSaveParameterMap").unwrap(),
+        )
+        .unwrap();
+        let pal_instance = before_map
+            .keys()
+            .filter_map(map_key_player_instance)
+            .find(|(player, instance)| player.to_u8() == old && instance.to_u8() != old_instance)
+            .map(|(_, instance)| instance)
+            .expect("snapshot should contain a Pal owned by the local host");
+        assert_eq!(before_map.len(), 389, "test snapshot CSPM baseline changed");
+        let before_pal_raw = map_entry_rawdata_by_instance(before_map, pal_instance)
+            .expect("the selected Pal must contain RawData");
+        let custom_versions = before.header.get_custom_versions().clone();
+        let absent = [0xD7; 16];
+        let (_, before_old_owner_count) = sav_io::swap_owner_guids_in_character_property_stream(
+            &before_pal_raw,
+            &custom_versions,
+            &old,
+            &absent,
+        )
+        .expect("read the Pal owner before migration");
+        let (_, before_new_owner_count) = sav_io::swap_owner_guids_in_character_property_stream(
+            &before_pal_raw,
+            &custom_versions,
+            &new,
+            &absent,
+        )
+        .expect("check the target owner before migration");
+        assert!(
+            before_old_owner_count > 0,
+            "selected Pal must belong to the old host"
+        );
+        assert_eq!(
+            before_new_owner_count, 0,
+            "selected Pal must not already belong to target UID"
+        );
+
+        let (patched, _) = patch_level_identity(
+            &level,
+            &old,
+            &new,
+            Some(&old_instance),
+            new_instance.as_ref(),
+        )
+        .expect("patch Level identity");
+        let after = patched.parse().unwrap();
+        let after_world = sav_io::top_field(&after, "worldSaveData")
+            .and_then(sav_io::struct_value)
+            .and_then(sav_io::custom_fields)
+            .unwrap();
+        let after_map = world_copy::as_props_map(
+            sav_io::field(after_world, "CharacterSaveParameterMap").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            after_map.len(),
+            before_map.len(),
+            "identity migration must preserve all CSPM records"
+        );
+        assert!(
+            after_map
+                .keys()
+                .filter_map(map_key_player_instance)
+                .any(|(player, instance)| player.to_u8() == new && instance.to_u8() == old_instance),
+            "source player CSPM key must move to the server UID"
+        );
+        let new_instance = new_instance.expect("target player InstanceId");
+        assert!(
+            after_map
+                .keys()
+                .filter_map(map_key_player_instance)
+                .any(|(player, instance)| player.to_u8() == old && instance.to_u8() == new_instance),
+            "target placeholder player CSPM key must swap to the old UID"
+        );
+        let pal_player_uid = after_map
+            .keys()
+            .filter_map(map_key_player_instance)
+            .find(|(_, instance)| *instance == pal_instance)
+            .map(|(player, _)| player.to_u8())
+            .expect("the Pal CSPM entry must still exist");
+        assert_eq!(
+            pal_player_uid, old,
+            "Pal CSPM key is a stable CharacterContainer reference and must not follow the player UID swap"
+        );
+        let after_pal_raw = map_entry_rawdata_by_instance(after_map, pal_instance)
+            .expect("the selected Pal RawData must remain after migration");
+        let (_, after_old_owner_count) = sav_io::swap_owner_guids_in_character_property_stream(
+            &after_pal_raw,
+            &custom_versions,
+            &old,
+            &absent,
+        )
+        .expect("check the old owner after migration");
+        let (_, after_new_owner_count) = sav_io::swap_owner_guids_in_character_property_stream(
+            &after_pal_raw,
+            &custom_versions,
+            &new,
+            &absent,
+        )
+        .expect("read the Pal owner after migration");
+        assert_eq!(
+            after_old_owner_count, 0,
+            "Pal RawData must no longer name the old host as owner"
+        );
+        assert_eq!(
+            after_new_owner_count, before_old_owner_count,
+            "Pal RawData OwnerPlayerUId must move to the server UID"
+        );
+    }
+
+    /// 缺少服务器新角色时必须在改写 Level.sav 和旧玩家文件前失败。
+    #[test]
+    fn phase_bc_missing_target_player_is_atomic() {
+        let work = std::env::temp_dir().join(format!(
+            "fixhost_missing_target_{}_{}",
+            std::process::id(),
+            DPS_TMP_SEQ.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&work);
+        let players = work.join("Players");
+        std::fs::create_dir_all(&players).expect("创建 Players 目录");
+
+        let old_uid = "01000000000000000000000000000000";
+        let new_uid = "02000000000000000000000000000000";
+        let old_bytes = sav_io::guid_bytes(old_uid).expect("解析 old GUID");
+        let new_bytes = sav_io::guid_bytes(new_uid).expect("解析 new GUID");
+
+        let mut level_raw = b"LEVEL-BEFORE".to_vec();
+        level_raw.extend_from_slice(&old_bytes);
+        level_raw.extend_from_slice(&new_bytes);
+        let level_path = work.join("Level.sav");
+        SavFile {
+            raw: level_raw,
+            compression: sav_io::SavCompression::Plz,
+        }
+        .save(&level_path)
+        .expect("写 Level.sav 应成功");
+
+        let old_player = players.join(format!("{}.sav", normalize_uid(old_uid)));
+        let mut old_player_raw = b"PLAYER-BEFORE".to_vec();
+        old_player_raw.extend_from_slice(&old_bytes);
+        SavFile {
+            raw: old_player_raw,
+            compression: sav_io::SavCompression::Plz,
+        }
+        .save(&old_player)
+        .expect("写旧玩家文件");
+        let level_before = std::fs::read(&level_path).expect("读取 Level 原始文件");
+        let player_before = std::fs::read(&old_player).expect("读取玩家原始文件");
+
+        let error = fix_host_save_multi(
+            &work,
+            &[UidMapping {
+                old_uid: old_uid.to_string(),
+                new_uid: new_uid.to_string(),
+            }],
+        )
+        .expect_err("缺少服务器新角色时必须拒绝");
+        assert!(error.contains("新角色存档不存在"));
+        assert_eq!(std::fs::read(&level_path).unwrap(), level_before);
+        assert_eq!(std::fs::read(&old_player).unwrap(), player_before);
+
+        let _ = std::fs::remove_dir_all(&work);
     }
 
     /// 合成损坏输入必须被拒绝（绝不静默产生损坏存档）。
     #[test]
     fn corrupt_sav_rejected() {
-        let tmp = std::env::temp_dir()
-            .join(format!("palworld_fixhost_corrupt_{}.sav", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!(
+            "palworld_fixhost_corrupt_{}.sav",
+            std::process::id()
+        ));
         // 截断 / 非法：仅 7 字节，远不足 12 字节头。
         std::fs::write(&tmp, b"GVAS\x00\x00").unwrap();
         let r = SavFile::load(&tmp);

@@ -10,11 +10,27 @@ export const useSettingsStore = defineStore('settings', () => {
     rcon_host: '127.0.0.1',
     rcon_port: 25575,
     rcon_password: '',
+    radmin_path: '',
+    local_save_roots: [],
+    server_save_roots: [],
+    backup_root: '',
+    backup_roots: [],
+    migration_backup_notice_seen: false,
   })
 
   async function load() {
     try {
-      settings.value = await api.settings.load()
+      const loaded = await api.settings.load()
+      settings.value = {
+        ...settings.value,
+        ...loaded,
+        local_save_roots: loaded.local_save_roots ?? [],
+        server_save_roots: loaded.server_save_roots ?? [],
+        backup_root: loaded.backup_root ?? '',
+        backup_roots: loaded.backup_roots ?? [],
+        migration_backup_notice_seen: loaded.migration_backup_notice_seen ?? false,
+        radmin_path: loaded.radmin_path ?? '',
+      }
     } catch (e) {
       console.warn('加载设置失败，使用默认值:', e)
     }

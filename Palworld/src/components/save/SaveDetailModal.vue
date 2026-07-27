@@ -1,34 +1,48 @@
 <template>
   <teleport to="body">
     <div v-if="world" class="sdm-overlay" @click.self="$emit('close')">
-      <div class="sdm-dialog" role="dialog" aria-modal="true">
+      <div class="sdm-dialog" role="dialog" aria-modal="true" aria-labelledby="world-detail-title">
         <div class="sdm-head">
-          <span class="sdm-title">{{ world.name }} · 存档信息</span>
-          <button class="btn btn-ghost btn-sm" @click="$emit('close')">关闭</button>
+          <span id="world-detail-title" class="sdm-title">{{ world.name }} · 世界详情</span>
+          <button type="button" class="btn btn-ghost btn-sm" @click="$emit('close')">关闭</button>
         </div>
 
         <div class="sdm-grid">
           <div class="sdm-item"><span class="sdm-k">来源</span><span class="sdm-v">{{ sourceLabel(world.source) }}</span></div>
           <div class="sdm-item"><span class="sdm-k">世界名</span><span class="sdm-v">{{ world.name }}</span></div>
-          <div class="sdm-item"><span class="sdm-k">GUID</span><span class="sdm-v mono">{{ world.guid || '（扁平布局无 GUID 层）' }}</span></div>
-          <div class="sdm-item"><span class="sdm-k">玩家数</span><span class="sdm-v">{{ world.player_count }}</span></div>
+          <div class="sdm-item"><span class="sdm-k">角色数</span><span class="sdm-v">{{ world.player_count }}</span></div>
           <div class="sdm-item"><span class="sdm-k">修改时间</span><span class="sdm-v">{{ world.modified_at || '未知' }}</span></div>
-          <div class="sdm-item sdm-item--full"><span class="sdm-k">路径</span><span class="sdm-v mono">{{ world.path }}</span></div>
         </div>
 
         <div class="sdm-players">
-          <div class="op-sub">Level.sav 解析概要（玩家列表）</div>
-          <div v-if="loading" class="sm-empty sm-empty--sm">解析中…</div>
-          <template v-else-if="summary">
-            <div v-if="summary.players.length" class="pp-list-mini">
-              <div v-for="p in summary.players" :key="p.guid" class="pp-item-mini">
-                <span class="pp-name-mini">{{ p.nickname || '(无名)' }}<em v-if="p.is_host" class="pp-host-mini">主机</em></span>
-                <span class="pp-meta-mini">Lv{{ p.level }} · 公会 {{ p.guild_id || '无' }} · 帕鲁 {{ p.pal_count }} · {{ p.last_online }}</span>
+          <div class="op-sub">角色</div>
+          <div v-if="loading" class="sm-empty sm-empty--sm">正在读取角色...</div>
+          <template v-else-if="modifierState">
+            <div v-if="modifierState.players.length" class="pp-list-mini">
+              <div v-for="p in modifierState.players" :key="p.player_uid" class="pp-item-mini">
+                <span class="pp-name-mini">{{ p.nickname || '(无名)' }}<em v-if="p.is_leader" class="pp-host-mini">会长</em></span>
+                <span class="pp-meta-mini">等级 {{ p.level }} · {{ p.guild_name || '无公会' }} · {{ p.pal_count }} 只帕鲁</span>
+                <span class="pp-tech-mini">普通科技点 {{ p.technology_points }} · 古代科技点 {{ p.ancient_technology_points }} · {{ p.last_online || '上次在线未知' }}</span>
               </div>
             </div>
             <div v-else class="sm-empty sm-empty--sm">该世界暂无玩家数据</div>
           </template>
           <div v-else class="sm-empty sm-empty--sm">该世界概要解析失败，可重试刷新检测</div>
+        </div>
+
+        <div class="sdm-guilds">
+          <div class="op-sub">公会</div>
+          <div v-if="loading" class="sm-empty sm-empty--sm">正在读取公会...</div>
+          <template v-else-if="modifierState">
+            <div v-if="modifierState.guilds.length" class="guild-list-mini">
+              <div v-for="guild in modifierState.guilds" :key="guild.guild_id" class="guild-item-mini">
+                <strong>{{ guild.name || '未命名公会' }}</strong>
+                <span>会长 {{ guild.leader_name || '未知' }} · {{ guild.member_count }} 名成员 · {{ guild.base_count }} 个据点 · 等级 {{ guild.level }}</span>
+              </div>
+            </div>
+            <div v-else class="sm-empty sm-empty--sm">该世界暂无公会数据</div>
+          </template>
+          <div v-else class="sm-empty sm-empty--sm">公会解析失败，可重试刷新检测</div>
         </div>
 
         <div class="sdm-actions">
@@ -37,14 +51,14 @@
             class="btn btn-primary btn-sm"
             @click="$emit('migrate', world)"
           >
-            迁移到服务器
+            迁移此世界
           </button>
           <button
             v-else
             class="btn btn-primary btn-sm"
             @click="$emit('setBackup', world)"
           >
-            设为备份目标
+            创建此世界备份
           </button>
         </div>
       </div>
@@ -53,11 +67,12 @@
 </template>
 
 <script setup lang="ts">
-import type { WorldInfo, WorldSummary } from '@/types/tauri'
+import type { ModifierWorldState, WorldInfo, WorldSummary } from '@/types/tauri'
 
 defineProps<{
   world: WorldInfo | null
   summary: WorldSummary | null
+  modifierState: ModifierWorldState | null
   loading: boolean
 }>()
 
@@ -146,6 +161,12 @@ function sourceLabel(s: string): string {
   padding-top: 14px;
   border-top: 1px dashed var(--glass-border, rgba(116, 88, 72, 0.2));
 }
+.sdm-guilds { margin-top: 14px; padding-top: 14px; border-top: 1px dashed var(--glass-border, rgba(116, 88, 72, 0.2)); }
+.pp-list-mini, .guild-list-mini { display: grid; gap: 8px; }
+.pp-item-mini, .guild-item-mini { display: grid; gap: 3px; padding: 9px 10px; border: 1px solid var(--glass-border, rgba(116, 88, 72, 0.18)); border-radius: 6px; background: rgba(255, 252, 247, .56); }
+.pp-name-mini, .guild-item-mini strong { color: var(--palwarm-text-primary, #3f322c); font-size: 13px; }
+.pp-meta-mini, .pp-tech-mini, .guild-item-mini span { color: var(--text-mid2, #8a7a6e); font-size: 11px; line-height: 1.5; }
+.pp-host-mini { margin-left: 6px; color: var(--primary-active, #c9543f); font-size: 10px; font-style: normal; }
 .op-sub {
   font-size: 13px;
   font-weight: 500;
