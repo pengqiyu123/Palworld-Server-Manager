@@ -30,10 +30,9 @@ pub struct AppSettings {
 }
 
 pub fn get_settings_path() -> Result<PathBuf, String> {
-    let app_dir = dirs::data_local_dir()
-        .ok_or("无法获取本地数据目录")?
-        .join("PalworldServerManager");
-
+    // 安装模式：data_dir = LocalAppData/PalworldServerManager（与 HEAD 一致，无行为变化）。
+    // 便携模式：data_dir = EXE 同级 /data。
+    let app_dir = crate::app_paths::current()?.data_dir().to_path_buf();
     std::fs::create_dir_all(&app_dir).map_err(|e| format!("创建目录失败: {}", e))?;
     Ok(app_dir.join("settings.json"))
 }

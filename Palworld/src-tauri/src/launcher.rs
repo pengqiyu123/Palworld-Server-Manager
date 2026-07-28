@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tauri::command;
 
+use crate::windows_process::hidden_command;
+
 // ==================== 启动类命令（收官 F2 / F3） ====================
 //
 // 这类命令只负责"拉起外部进程"，不接管后续交互：
@@ -113,7 +115,7 @@ fn find_palworld_exe() -> Option<String> {
 /// 检查 Steam 客户端是否正在运行（通过 tasklist 查询 steam.exe 进程）。
 /// tasklist 在所有 Windows 版本上均可用；/FO CSV + /NH 输出无表头的 CSV 便于精确匹配。
 fn is_steam_running() -> bool {
-    Command::new("tasklist")
+    hidden_command("tasklist")
         .args(["/FI", "IMAGENAME eq steam.exe", "/FO", "CSV", "/NH"])
         .output()
         .map(|o| {
@@ -138,7 +140,7 @@ pub async fn launch_game() -> Result<String, String> {
     let steam_running = is_steam_running();
 
     // 优先：通过 Steam 协议拉起。空标题 "" 避免 start 把含 ":" 的 URL 误判为窗口标题。
-    let steam_ok = Command::new("cmd")
+    let steam_ok = hidden_command("cmd")
         .args(["/c", "start", "", "steam://rungame/1623730"])
         .spawn()
         .is_ok();

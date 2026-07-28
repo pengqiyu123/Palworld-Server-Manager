@@ -163,37 +163,54 @@ pub async fn migrate_world_v4(
     state: State<'_, ServerState>,
     app: tauri::AppHandle,
 ) -> Result<WorldMigrationOutcome, String> {
-    if req.source_name.trim().is_empty() {
-        return Err("源世界名称不能为空".to_string());
-    }
-    if !req.preserve_server_config {
-        return Err("世界迁移必须保留服务器配置".to_string());
-    }
-    emit_progress(&app, &req.request_id, "checking_server", "正在检查服务器")?;
-    crate::save_edit::ensure_server_stopped(&state)?;
+    // 迁移是高风险破坏性操作，任一步骤失败（服务器未停、源档缺失、备份初始化失败、
+    // 事务回滚失败等）都必须落盘项目日志，便于用户反馈与事后追溯。
+    // 业务体包进 IIFE，在边界统一记录错误，不污染每个 ? 的错误信息。
+    let result = (|| -> Result<WorldMigrationOutcome, String> {
+        if req.source_name.trim().is_empty() {
+            return Err("源世界名称不能为空".to_string());
+        }
+        if !req.preserve_server_config {
+            return Err("世界迁移必须保留服务器配置".to_string());
+        }
+        emit_progress(&app, &req.request_id, "checking_server", "正在检查服务器")?;
+        crate::save_edit::ensure_server_stopped(&state)?;
 
-    let source = crate::save_edit::path_util::find_world_data_dir(Path::new(&req.source_path))
-        .ok_or_else(|| format!("未找到本地世界存档: {}", req.source_path))?;
-    let target = crate::save_edit::path_util::world_data_dir(&req.target_world)?;
-    let settings = crate::settings::load_settings()?;
-    let backup_root = backup_service::initialize_backup_root(&settings)?;
-    let workflow_id = new_workflow_id();
-    let request_id = req.request_id.clone();
-    let app_for_progress = app.clone();
-    let outcome = migrate_world_transactional_with_progress(
-        WorldMigrationPaths {
-            source_world: &source,
-            target_world: &target,
-            backup_root: &backup_root,
-            target_name: &req.target_world,
-            workflow_id: &workflow_id,
-        },
-        move |(phase, label)| {
-            let _ = emit_progress(&app_for_progress, &request_id, phase, label);
-        },
-    )?;
-    emit_progress(&app, &req.request_id, "completed", "世界迁移完成")?;
-    Ok(outcome)
+        let source = crate::save_edit::path_util::find_world_data_dir(Path::new(&req.source_path))
+            .ok_or_else(|| format!("未找到本地世界存档: {}", req.source_path))?;
+        let target = crate::save_edit::path_util::world_data_dir(&req.target_world)?;
+        let settings = crate::settings::load_settings()?;
+        let backup_root = backup_service::initialize_backup_root(&settings)?;
+        let workflow_id = new_workflow_id();
+        let request_id = req.request_id.clone();
+        let app_for_progress = app.clone();
+        let outcome = migrate_world_transactional_with_progress(
+            WorldMigrationPaths {
+                source_world: &source,
+                target_world: &target,
+                backup_root: &backup_root,
+                target_name: &req.target_world,
+                workflow_id: &workflow_id,
+            },
+            move |(phase, label)| {
+                let _ = emit_progress(&app_for_progress, &request_id, phase, label);
+            },
+        )?;
+        emit_progress(&app, &req.request_id, "completed", "世界迁移完成")?;
+        Ok(outcome)
+    })();
+    if let Err(error) = &result {
+        crate::app_log::record(
+            "ERROR",
+            "save.migrate_world_v4",
+            error,
+            &[
+                ("request_id", &req.request_id),
+                ("source_name", &req.source_name),
+            ],
+        );
+    }
+    result
 }
 
 fn emit_progress(

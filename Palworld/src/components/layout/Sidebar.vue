@@ -40,16 +40,7 @@
     </router-link>
 
     <div class="nav-spacer" />
-    <div class="nav-divider" />
-    <router-link
-      to="/settings"
-      class="nav-item"
-      active-class="active"
-    >
-      <AppIcon name="settings" :size="18" />
-      <span class="nav-item-label">设置</span>
-    </router-link>
-    <div class="nav-version">v1.0.0</div>
+    <div class="nav-version">v1.0.1</div>
   </aside>
 </template>
 
@@ -74,6 +65,7 @@ const navItems = [
   { path: '/saves', label: '世界存档', icon: 'save' },
   { path: '/migrate', label: '世界与角色迁移', icon: 'migration' },
   { path: '/modifier', label: '修改器', icon: 'modifier' },
+  { path: '/system-logs', label: '系统日志', icon: 'logs' },
 ]
 
 const hasServerProcess = computed(() => serverStore.status.running)

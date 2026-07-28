@@ -14,12 +14,12 @@ pub struct BackupInfo {
     pub size_bytes: u64,
 }
 
-/// 获取备份目录：%AppData%/PalworldServerManager/config-backups/
+/// 获取备份目录：安装模式为 %AppData%/PalworldServerManager/config-backups/（HEAD 既有），
+/// 便携模式为 EXE 同级 /data/config-backups/。
 fn backups_dir() -> Result<PathBuf, String> {
-    let app_data = dirs::data_dir().ok_or_else(|| "无法定位 AppData 目录".to_string())?;
-    let dir = app_data
-        .join("PalworldServerManager")
-        .join("config-backups");
+    let dir = crate::app_paths::current()?
+        .config_backups_dir()
+        .to_path_buf();
     if !dir.exists() {
         std::fs::create_dir_all(&dir).map_err(|e| format!("创建备份目录失败: {}", e))?;
     }
@@ -480,32 +480,44 @@ pub async fn read_config(path: String) -> Result<HashMap<String, String>, String
 
 #[command]
 pub async fn write_config(path: String, config: HashMap<String, String>) -> Result<String, String> {
-    // 写入前备份现有配置（若文件存在）
-    backup_existing_config(&path);
+    // 失败边界记录项目日志：配置写入是高频破坏性操作，失败必须落盘以便用户反馈
+    // 「哪里错了」；成功也记一条 INFO，便于追溯写入时间线。整个业务体包进 IIFE，
+    // 在边界统一记录，不污染每个 ? 的错误信息。
+    let result = (|| -> Result<String, String> {
+        // 写入前备份现有配置（若文件存在）
+        backup_existing_config(&path);
 
-    let mut options: Vec<(String, String)> = config.into_iter().collect();
-    options.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut options: Vec<(String, String)> = config.into_iter().collect();
+        options.sort_by(|a, b| a.0.cmp(&b.0));
 
-    let lines: Vec<String> = options
-        .into_iter()
-        .map(|(k, v)| format!("{}={}", k, v))
-        .collect();
+        let lines: Vec<String> = options
+            .into_iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect();
 
-    let content = format!(
-        "[/Script/Pal.PalGameWorldSettings]\nOptionSettings=({})\n",
-        lines.join(",")
-    );
+        let content = format!(
+            "[/Script/Pal.PalGameWorldSettings]\nOptionSettings=({})\n",
+            lines.join(",")
+        );
 
-    // 首次启动前 WindowsServer 目录可能尚未被服务器创建，写入前先确保父目录存在
-    if let Some(parent) = Path::new(&path).parent() {
-        if !parent.as_os_str().is_empty() && !parent.exists() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败: {}", e))?;
+        // 首次启动前 WindowsServer 目录可能尚未被服务器创建，写入前先确保父目录存在
+        if let Some(parent) = Path::new(&path).parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败: {}", e))?;
+            }
         }
+
+        std::fs::write(&path, content).map_err(|e| format!("写入配置文件失败: {}", e))?;
+
+        Ok("配置文件已保存".to_string())
+    })();
+    match &result {
+        Ok(_) => {
+            crate::app_log::record("INFO", "config.write", "配置文件已保存", &[("path", &path)])
+        }
+        Err(error) => crate::app_log::record("ERROR", "config.write", error, &[("path", &path)]),
     }
-
-    std::fs::write(&path, content).map_err(|e| format!("写入配置文件失败: {}", e))?;
-
-    Ok("配置文件已保存".to_string())
+    result
 }
 
 #[command]
@@ -523,6 +535,16 @@ pub struct FillConfigResult {
     pub source: String,
     /// 面向用户的中文提示
     pub message: String,
+}
+
+fn has_option_settings_assignment(content: &str) -> bool {
+    content.lines().any(|line| {
+        let line = line.trim_start_matches('\u{feff}').trim();
+        let Some((name, value)) = line.split_once('=') else {
+            return false;
+        };
+        name.trim().eq_ignore_ascii_case("OptionSettings") && value.trim_start().starts_with('(')
+    })
 }
 
 /// 一键填充默认配置（仅手动按钮触发，绝不接入 start_server 自动守卫）。
@@ -554,7 +576,7 @@ pub async fn fill_default_config(server_path: String) -> Result<FillConfigResult
     // ① 已填好（含 OptionSettings=( ）→ 跳过
     if live.exists() {
         if let Ok(content) = std::fs::read_to_string(&live) {
-            if content.contains("OptionSettings=(") {
+            if has_option_settings_assignment(&content) {
                 return Ok(FillConfigResult {
                     status: "already_filled".into(),
                     source: live.to_string_lossy().into(),
@@ -629,7 +651,7 @@ pub async fn is_config_initialized(server_path: String) -> Result<bool, String> 
         return Ok(false);
     }
     let content = std::fs::read_to_string(&live).map_err(|e| format!("读取配置文件失败: {}", e))?;
-    Ok(content.contains("OptionSettings=("))
+    Ok(has_option_settings_assignment(&content))
 }
 
 #[command]
@@ -1343,6 +1365,35 @@ mod tests {
                 .unwrap();
         assert!(res, "文件存在且含 OptionSettings=( 应返回 true");
         let _ = std::fs::remove_dir_all(&sp);
+    }
+
+    #[test]
+    fn is_config_initialized_accepts_bom_whitespace_and_case_variants() {
+        for (suffix, content) in [
+            (
+                "ici_whitespace",
+                "\u{feff}[/Script/Pal.PalGameWorldSettings]\nOptionSettings = (Difficulty=None)\n",
+            ),
+            (
+                "ici_case",
+                "[/Script/Pal.PalGameWorldSettings]\noptionsettings=(Difficulty=None)\n",
+            ),
+        ] {
+            let sp = make_qa_server_path(suffix);
+            let ws = sp
+                .join("Pal")
+                .join("Saved")
+                .join("Config")
+                .join("WindowsServer");
+            std::fs::create_dir_all(&ws).unwrap();
+            std::fs::write(ws.join("PalWorldSettings.ini"), content).unwrap();
+
+            let initialized =
+                tauri::async_runtime::block_on(is_config_initialized(sp.to_string_lossy().into()))
+                    .unwrap();
+            assert!(initialized, "配置变体应识别为已初始化: {suffix}");
+            let _ = std::fs::remove_dir_all(&sp);
+        }
     }
 
     #[test]

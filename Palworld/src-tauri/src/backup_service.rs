@@ -149,24 +149,13 @@ pub fn resolve_backup_root(settings: &AppSettings) -> Result<PathBuf, String> {
     if !settings.backup_root.trim().is_empty() {
         return Ok(PathBuf::from(settings.backup_root.trim()));
     }
-
-    #[cfg(debug_assertions)]
-    {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .map(|parent| parent.join("backups"))
-            .ok_or_else(|| "无法定位项目备份目录".to_string())
-    }
-
-    #[cfg(not(debug_assertions))]
-    {
-        let executable =
-            std::env::current_exe().map_err(|error| format!("无法定位程序目录: {error}"))?;
-        let parent = executable
-            .parent()
-            .ok_or_else(|| "无法定位程序所在目录".to_string())?;
-        Ok(parent.join("backups"))
-    }
+    // 默认目录统一由 app_paths 解析：
+    // - 安装模式 debug：CARGO_MANIFEST_DIR/.. /backups（逐字保留 HEAD，守护既有回归测试）
+    // - 安装模式 release：EXE 同级 /backups（HEAD 既有）
+    // - 便携模式：EXE 同级 /backups
+    Ok(crate::app_paths::current()?
+        .world_backups_dir()
+        .to_path_buf())
 }
 
 pub fn initialize_backup_root(settings: &AppSettings) -> Result<PathBuf, String> {

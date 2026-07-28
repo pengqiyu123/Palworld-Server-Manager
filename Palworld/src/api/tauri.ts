@@ -62,13 +62,29 @@ async function tauriInvoke<T>(
   try {
     return await invoke<T>(cmd, args as Record<string, unknown> | undefined)
   } catch (err) {
-    if (typeof err === 'string') {
-      throw new Error(err)
+    const error = typeof err === 'string'
+      ? new Error(err)
+      : err && typeof err === 'object' && 'message' in err
+        ? new Error(String((err as { message: unknown }).message))
+        : new Error(String(err))
+
+    const commandsWithoutErrorLog = new Set([
+      'get_server_status',
+      'get_server_logs',
+      'get_app_logs',
+      'rest_get_info',
+      'rest_get_metrics',
+      'rest_get_players',
+      'write_app_log',
+    ])
+    if (!commandsWithoutErrorLog.has(cmd)) {
+      await invoke('write_app_log', {
+        level: 'ERROR',
+        operation: `command.${cmd}`,
+        message: error.message,
+      }).catch(() => undefined)
     }
-    if (err && typeof err === 'object' && 'message' in err) {
-      throw new Error((err as { message: string }).message)
-    }
-    throw new Error(String(err))
+    throw error
   }
 }
 
@@ -304,6 +320,20 @@ export const api = {
     save: (serverPath: string) => tauriInvoke<void>('rest_save_world', { serverPath }),
     shutdown: (serverPath: string, waittime: number, message: string) =>
       tauriInvoke<void>('rest_shutdown', { serverPath, waittime, message }),
+  },
+
+  // === app_log.rs (4 个) · 系统日志（便携模式落 EXE 同级 data/logs/app.log）===
+  // 操作失败会自动写入日志；用户可在系统日志页查看、复制、导出或清空。
+  appLog: {
+    /** 读取最近 1000 行项目日志（按时间正序）。 */
+    getLogs: () => tauriInvoke<string[]>('get_app_logs'),
+    /** 清空项目日志文件。 */
+    clearLogs: () => tauriInvoke<void>('clear_app_logs'),
+    /** 前端主动写一条项目日志（level: INFO/WARN/ERROR）。 */
+    writeLog: (level: string, operation: string, message: string) =>
+      tauriInvoke<void>('write_app_log', { level, operation, message }),
+    /** 导出管理器系统日志到指定路径，返回写入条数。 */
+    exportLogs: (path: string) => tauriInvoke<number>('export_system_logs', { path }),
   },
 }
 

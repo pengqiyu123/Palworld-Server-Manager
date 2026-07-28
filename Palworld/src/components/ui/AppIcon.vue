@@ -126,6 +126,10 @@ const ICONS: Record<string, { vb: string; inner: string }> = {
     vb: '0 0 22 22',
     inner: '<path d="M5 5H17M5 11H17M5 17H17" stroke="#e66f51" stroke-width="1.4" stroke-linecap="round"/><circle cx="9" cy="5" r="2" fill="#3f322c" stroke="#e66f51" stroke-width="1.4"/><circle cx="14" cy="11" r="2" fill="#3f322c" stroke="#e66f51" stroke-width="1.4"/><circle cx="7" cy="17" r="2" fill="#3f322c" stroke="#e66f51" stroke-width="1.4"/>',
   },
+  troubleshoot: {
+    vb: '0 0 22 22',
+    inner: '<path d="M6 4.5V8.5A4 4 0 0 0 14 8.5V4.5M14 12.5H16.5M18 15V17.5M18 15H20.5M18 15V12.5" stroke="#e66f51" stroke-width="1.4" stroke-linecap="round" fill="none"/><circle cx="6" cy="4" r="1.6" stroke="#e66f51" stroke-width="1.4" fill="none"/><circle cx="14" cy="4" r="1.6" stroke="#e66f51" stroke-width="1.4" fill="none"/><path d="M10 12.5V16.5H13" stroke="#e66f51" stroke-width="1.4" stroke-linecap="round" fill="none"/>',
+  },
   'ph-backup': {
     vb: '0 0 56 56',
     inner: '<rect x="9" y="9" width="38" height="38" rx="5" stroke="#a39383" stroke-width="2.4" fill="none"/><path d="M18 9V18H38V9" stroke="#a39383" stroke-width="2.4" fill="none"/><circle cx="28" cy="32" r="6" stroke="#a39383" stroke-width="2.4" fill="none"/>',

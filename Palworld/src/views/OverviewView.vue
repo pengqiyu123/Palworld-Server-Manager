@@ -1,7 +1,7 @@
 <template>
   <section class="screen active">
     <!-- 配置空白横幅（P1）：PalWorldSettings.ini 未初始化时提示 -->
-    <div class="config-banner" v-if="serverPathDetected && !isConfigInitialized">
+    <div class="config-banner" v-if="serverPathDetected && isConfigInitialized === false">
       <AppIcon name="info" :size="16" />
       <span class="config-banner-text">
         检测到 <code>PalWorldSettings.ini</code> 为空或未含配置，开服前需先填充默认配置。
@@ -50,7 +50,7 @@
             :disabled="serverStore.loading"
             @click="onStart"
           >
-            {{ serverStore.loading ? '启动中…' : '启动服务器' }}
+            {{ serverStore.starting ? '启动中…' : '启动服务器' }}
           </button>
           <template v-else>
             <button class="btn btn-ghost" :disabled="serverStore.loading" @click="onGracefulShutdown">优雅关服</button>
@@ -241,7 +241,7 @@
                   :disabled="!serverPathDetected || serverStore.loading"
                   @click="onStart"
                 >
-                  {{ serverStore.loading ? '启动中…' : '启动服务器' }}
+                  {{ serverStore.starting ? '启动中…' : '启动服务器' }}
                 </button>
                 <template v-else>
                   <button class="btn btn-ghost btn-sm" :disabled="serverStore.loading" @click="onGracefulShutdown">优雅关服</button>
@@ -301,7 +301,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useUiStore } from '@/stores/ui'
 import { useServerStore } from '@/stores/server'
@@ -339,13 +339,16 @@ const refreshingStatus = ref(false)
 
 // 朋友首次加入时只提示一次。
 // 第 7 步（S7 朋友入服）首次 players>=2 时由 onboardingStore 幂等触发（successFired 锁，仅一次）
-onMounted(async () => {
+onMounted(() => {
   onboardingStore.onSuccess(() => {
     toast.success('联机成功，朋友已加入服务器')
   })
-  await checkConfigInitialized()
   void detectPaths()
 })
+
+watch(() => settingsStore.settings.server_path, () => {
+  void checkConfigInitialized()
+}, { immediate: true })
 
 // 启动区常驻所需的运行状态判定（与 Sidebar 同源）
 const isRunning = computed(() => serverStore.status.running)
@@ -570,7 +573,7 @@ async function onStart(): Promise<void> {
     return
   }
   await checkConfigInitialized()
-  if (!isConfigInitialized.value) {
+  if (isConfigInitialized.value !== true) {
     toast.info('首次开服，请先完成配置')
     await router.push('/config?firstTime=true')
     return
@@ -653,16 +656,18 @@ async function onLaunchRadmin(): Promise<void> {
 }
 
 // ====== 配置空白横幅（P1）：探测 live 是否已含 OptionSettings=( ======
-const isConfigInitialized = ref(false)
+const isConfigInitialized = ref<boolean | null>(null)
 async function checkConfigInitialized(): Promise<void> {
   if (!serverPathDetected.value) {
-    isConfigInitialized.value = false
+    isConfigInitialized.value = null
     return
   }
   try {
     isConfigInitialized.value = await api.config.isInitialized(settingsStore.settings.server_path)
-  } catch {
-    isConfigInitialized.value = false
+  } catch (error) {
+    isConfigInitialized.value = null
+    const message = error instanceof Error ? error.message : String(error)
+    toast.error(`读取服务器配置失败: ${message}`)
   }
 }
 

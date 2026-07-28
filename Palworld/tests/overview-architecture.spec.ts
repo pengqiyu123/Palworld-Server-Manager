@@ -3,6 +3,13 @@ import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 describe('OverviewView architecture', () => {
+  it('uses the server start action state for start buttons', async () => {
+    const source = await readFile(resolve(process.cwd(), 'src/views/OverviewView.vue'), 'utf8')
+
+    expect(source).toContain("serverStore.starting ? '启动中…' : '启动服务器'")
+    expect(source).not.toContain("serverStore.loading ? '启动中…' : '启动服务器'")
+  })
+
   it('keeps overview actions mounted when server status changes', async () => {
     const source = await readFile(resolve(process.cwd(), 'src/views/OverviewView.vue'), 'utf8')
 

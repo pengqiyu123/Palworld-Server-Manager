@@ -1,3 +1,7 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod app_log;
+mod app_paths;
 mod backup_service;
 mod config;
 mod firewall;
@@ -11,14 +15,54 @@ mod save_transfer;
 mod server;
 mod settings;
 mod steam_detect;
+mod windows_process;
 
 use server::ServerState;
 use std::sync::{Arc, Mutex};
 use tauri::{LogicalSize, WebviewUrl, WebviewWindowBuilder};
 
+/// 弹出中文错误对话框（Windows MessageBoxW），用于启动期 fail-fast 错误。
+/// 用户从资源管理器双击 EXE 时无控制台可见，仅 stderr 等于「没反应」，
+/// 因此必须用系统模态对话框明确告知失败原因。
+#[cfg(target_os = "windows")]
+fn show_fatal_error(title: &str, message: &str) {
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        MessageBoxW, MB_ICONERROR, MB_OK, MB_SYSTEMMODAL,
+    };
+    let title_w: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+    let message_w: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
+    // MB_SYSTEMMODAL 确保弹窗置顶，即便用户正在其他窗口也能看到。
+    unsafe {
+        let _ = MessageBoxW(
+            None,
+            PCWSTR(message_w.as_ptr()),
+            PCWSTR(title_w.as_ptr()),
+            MB_OK | MB_ICONERROR | MB_SYSTEMMODAL,
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn show_fatal_error(title: &str, message: &str) {
+    eprintln!("[{title}] {message}");
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    // 便携模式 fail-fast：EXE 同级存在 portable.flag 时，若根目录不可写则直接退出，
+    // 不进入 Tauri 主循环、不静默回退 LocalAppData。
+    // 必须弹窗告知用户（双击启动无控制台），否则表现就是「没反应」。
+    if let Err(error) = app_paths::init() {
+        eprintln!("[app-paths] {error}");
+        show_fatal_error("Palworld Server Manager 启动失败", &error);
+        return;
+    }
+    // 日志接入：panic hook 先于一切业务逻辑安装，确保运行期任意 panic 都落盘；
+    // 随后记录一条 INFO 级启动日志，验证日志链路（便携模式落 EXE/data/logs/app.log）。
+    app_log::install_panic_hook();
+    app_log::record("INFO", "app.start", "项目启动", &[]);
+    let result = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             if let Ok(settings) = settings::load_settings() {
@@ -33,6 +77,7 @@ pub fn run() {
                 }
             }
             // 第一层：Tauri 标准 API（visible=false + 显式 set_size + show）
+            app_log::record("INFO", "window.create", "正在创建主窗口", &[]);
             let window =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                     .title("Palworld Server Manager")
@@ -44,11 +89,21 @@ pub fn run() {
                     .resizable(true)
                     .visible(false)
                     .build()?;
-            let _ = window.set_size(LogicalSize::new(1200.0, 760.0));
-            // 窗口配置已全部在上方 WebviewWindowBuilder 声明完成（transparent/decorations/resizable）
-            // 已移除 window_fix Win32 MoveWindow hack（不再需要）
-            let _ = window.show();
-            let _ = window.set_focus();
+            window
+                .set_size(LogicalSize::new(1200.0, 760.0))
+                .map_err(|error| {
+                    app_log::record("ERROR", "window.set_size", &error.to_string(), &[]);
+                    error
+                })?;
+            window.show().map_err(|error| {
+                app_log::record("ERROR", "window.show", &error.to_string(), &[]);
+                error
+            })?;
+            window.set_focus().map_err(|error| {
+                app_log::record("ERROR", "window.focus", &error.to_string(), &[]);
+                error
+            })?;
+            app_log::record("INFO", "window.shown", "主窗口已显示", &[]);
             // 路由切换文件轮询（E2E 验收用）
             route_switch::spawn_route_switch_poll(app.handle().clone());
             Ok(())
@@ -69,6 +124,10 @@ pub fn run() {
                 server::get_server_logs,
                 server::clear_server_logs,
                 server::export_server_logs,
+                app_log::get_app_logs,
+                app_log::clear_app_logs,
+                app_log::write_app_log,
+                app_log::export_system_logs,
                 config::read_config,
                 config::write_config,
                 config::get_default_config,
@@ -142,10 +201,33 @@ pub fn run() {
                 rest_proxy::rest_execute_management_command,
             ]
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .run(tauri::generate_context!());
+
+    if let Err(error) = result {
+        app_log::record("ERROR", "app.run", &error.to_string(), &[]);
+        show_fatal_error(
+            "Palworld Server Manager 启动失败",
+            "无法创建或显示应用窗口。请在“故障排查”中导出项目日志，或重新启动应用后再试。",
+        );
+    }
 }
 
 fn main() {
     run();
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn startup_does_not_discard_window_initialization_errors() {
+        let source = include_str!("main.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("main.rs must have production code before its tests");
+
+        assert!(!production_source.contains("let _ = window.set_size"));
+        assert!(!production_source.contains("let _ = window.show"));
+        assert!(!production_source.contains("let _ = window.set_focus"));
+    }
 }

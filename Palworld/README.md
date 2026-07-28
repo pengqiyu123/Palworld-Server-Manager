@@ -16,7 +16,7 @@
 
 ## 开发
 
-进入 `Palworld/` 后执行：
+在本目录执行：
 
 ```powershell
 npm install
@@ -38,11 +38,19 @@ cargo test --all-targets
 
 ## 仓库结构
 
-- `Palworld/src/`：Vue 前端、Pinia 状态和 Tauri 类型化调用。
-- `Palworld/src-tauri/src/`：服务器、REST、备份、迁移与修改器后端。
-- `Palworld/tests/`、`Palworld/src-tauri/tests/`：前端和 Rust 集成测试。
+- `src/`：Vue 前端、Pinia 状态和 Tauri 类型化调用。
+- `src-tauri/src/`：服务器、REST、备份、迁移与修改器后端。
+- `tests/`、`src-tauri/tests/`：前端和 Rust 集成测试。
 - `docs/`：产品、架构、存档研究、发布记录及历史归档；从 `docs/README.md` 开始阅读。
-- `reference-projects/`：本地研究资料，已忽略且不会上传。
+
+便携版构建：
+
+```powershell
+npm run tauri:build:portable
+npm run package:portable
+```
+
+发布 ZIP 位于 `dist-portable/`，解压后从唯一的外层文件夹内启动应用。
 
 ## 许可证
 

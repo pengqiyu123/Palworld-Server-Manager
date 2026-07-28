@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
+use std::os::windows::ffi::OsStringExt;
 use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::path::PathBuf;
@@ -6,7 +8,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{command, Emitter, State};
-use windows::core::w;
+use windows::core::{w, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, STILL_ACTIVE};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_SHARE_READ, FILE_SHARE_WRITE,
@@ -17,9 +19,12 @@ use windows::Win32::System::Console::{
     ReadConsoleOutputCharacterW, CONSOLE_SCREEN_BUFFER_INFO, COORD,
 };
 use windows::Win32::System::Threading::{
-    GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetExitCodeProcess, OpenProcess, QueryFullProcessImageNameW, TerminateProcess,
+    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+
+use crate::windows_process::hidden_command;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ServerStatus {
@@ -189,13 +194,6 @@ fn stream_server_console_logs(
     });
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct WindowsProcess {
-    process_id: u32,
-    executable_path: Option<String>,
-}
-
 // ==================== 进程路径解析（★D4） ====================
 
 /// 解析 PalServer 可执行文件路径。
@@ -243,35 +241,58 @@ fn find_existing_server_pids(server_path: &str) -> Vec<u32> {
         .iter()
         .map(|path| normalize_windows_path(path))
         .collect();
-    let script = "Get-CimInstance Win32_Process -Filter \"Name = 'PalServer-Win64-Shipping-Cmd.exe' OR Name = 'PalServer.exe'\" | Select-Object ProcessId, ExecutablePath | ConvertTo-Json -Compress";
-    let Ok(output) = Command::new("powershell")
-        .args(["-NoProfile", "-Command", script])
+    find_process_ids_by_image_names(&["PalServer-Win64-Shipping-Cmd.exe", "PalServer.exe"])
+        .into_iter()
+        .filter_map(|process_id| {
+            let executable = process_executable_path(process_id)?;
+            expected
+                .iter()
+                .any(|path| *path == normalize_windows_path(Path::new(&executable)))
+                .then_some(process_id)
+        })
+        .collect()
+}
+
+/// 用 tasklist 枚举候选镜像名，再由 Windows API 校验完整路径。
+/// tasklist 的 CSV 数据行格式与系统语言无关；我们不依赖其“无任务”提示文字。
+fn find_process_ids_by_image_names(image_names: &[&str]) -> Vec<u32> {
+    let Ok(output) = hidden_command("tasklist")
+        .args(["/FO", "CSV", "/NH"])
         .output()
     else {
         return Vec::new();
     };
-    let raw = String::from_utf8_lossy(&output.stdout);
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(raw.trim()) else {
-        return Vec::new();
-    };
-    let processes: Vec<WindowsProcess> = if json.is_array() {
-        serde_json::from_value(json).unwrap_or_default()
-    } else {
-        serde_json::from_value(json)
-            .map(|process| vec![process])
-            .unwrap_or_default()
-    };
-
-    processes
-        .into_iter()
-        .filter_map(|process| {
-            let executable = process.executable_path?;
-            expected
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.trim().trim_matches('"').split("\",\"");
+            let image_name = fields.next()?;
+            let process_id = fields.next()?.parse::<u32>().ok()?;
+            image_names
                 .iter()
-                .any(|path| *path == normalize_windows_path(Path::new(&executable)))
-                .then_some(process.process_id)
+                .any(|candidate| image_name.eq_ignore_ascii_case(candidate))
+                .then_some(process_id)
         })
         .collect()
+}
+
+/// 以受限查询权限获取进程映像路径。无法查询的系统/其他用户进程会被安全跳过，
+/// 绝不把同名、不同目录的服务器误识别为当前受管实例。
+fn process_executable_path(pid: u32) -> Option<PathBuf> {
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buffer = vec![0u16; 32_768];
+        let mut length = buffer.len() as u32;
+        let queried = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            PWSTR(buffer.as_mut_ptr()),
+            &mut length,
+        )
+        .is_ok();
+        let _ = CloseHandle(handle);
+        queried.then(|| PathBuf::from(OsString::from_wide(&buffer[..length as usize])))
+    }
 }
 
 fn find_existing_server_pid(server_path: &str) -> Option<u32> {
@@ -306,7 +327,7 @@ pub fn is_palworld_game_process_name(name: &str) -> bool {
 }
 
 fn is_image_running(image_name: &str) -> bool {
-    Command::new("tasklist")
+    hidden_command("tasklist")
         .args([
             "/FI",
             &format!("IMAGENAME eq {}", image_name),
@@ -336,7 +357,7 @@ fn has_udp_binding(pid: u32, port: u16) -> bool {
         "Get-NetUDPEndpoint -OwningProcess {} -LocalPort {} -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess",
         pid, port
     );
-    Command::new("powershell")
+    hidden_command("powershell")
         .args(["-NoProfile", "-Command", &script])
         .output()
         .map(|output| String::from_utf8_lossy(&output.stdout).trim() == pid.to_string())
@@ -432,13 +453,35 @@ fn force_terminate_server_process(
         if !is_process_running(pid) {
             continue;
         }
-        let status = Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .status()
-            .map_err(|e| format!("停止已运行的服务器失败: {}", e))?;
-        if !status.success() && is_process_running(pid) {
-            return Err(format!("停止已运行的服务器失败（PID {}）", pid));
+        terminate_external_process(pid)?;
+    }
+    Ok(())
+}
+
+/// 强制停止用户在应用外启动、但路径与当前服务器目录一致的进程。
+/// 使用 Windows API 而不是 taskkill：后者在受限终端/本地化环境中可能返回访问拒绝，
+/// 即使当前用户对自己启动的 PalServer 具有终止权限。
+fn terminate_external_process(pid: u32) -> Result<(), String> {
+    unsafe {
+        let handle = OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+            false,
+            pid,
+        )
+        .map_err(|error| format!("无法停止服务器进程（PID {pid}）: {error}"))?;
+        let terminated = TerminateProcess(handle, 1).is_ok();
+        let _ = CloseHandle(handle);
+        if !terminated && is_process_running(pid) {
+            return Err(format!("停止已运行的服务器失败（PID {pid}）"));
         }
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while is_process_running(pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if is_process_running(pid) {
+        return Err(format!("服务器进程未在规定时间内退出（PID {pid}）"));
     }
     Ok(())
 }

@@ -28,6 +28,7 @@ export const useServerStore = defineStore('server', () => {
   // 日志来源标记（★D4）："cmd" = Cmd 版日志可用；"wrapper" = 包装器模式日志不可用（仅提示横条）
   const logSource = ref<string | null>(null)
   const loading = ref(false)
+  const starting = ref(false)
 
   // REST 数据（3s 轮询刷新）
   const serverInfo = ref<ServerInfo | null>(null)
@@ -67,9 +68,11 @@ export const useServerStore = defineStore('server', () => {
 
   async function start(path: string) {
     loading.value = true
+    starting.value = true
     try {
       status.value = await api.server.start(path)
     } finally {
+      starting.value = false
       loading.value = false
     }
   }
@@ -316,6 +319,7 @@ export const useServerStore = defineStore('server', () => {
     logs,
     logSource,
     loading,
+    starting,
     serverInfo,
     serverMetrics,
     players,

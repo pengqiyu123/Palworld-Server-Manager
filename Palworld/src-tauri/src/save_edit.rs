@@ -411,13 +411,31 @@ fn rollback_migration_v2_impl(backup_path: &Path, save_root: &Path) -> Result<()
 /// L1/L2：解析世界玩家与公会摘要（按世界名，服务器 SaveGames 根下）。
 #[tauri::command]
 pub async fn f5_world_summary(world_name: String) -> Result<WorldSummary, String> {
-    world_copy::f5_world_summary_impl(&world_name)
+    // 存档解析失败边界记录项目日志：解析失败通常意味着存档结构异常或路径错误，
+    // 用户无法从 UI 错误信息定位根因，必须落盘以便反馈。
+    world_copy::f5_world_summary_impl(&world_name).map_err(|error| {
+        crate::app_log::record(
+            "ERROR",
+            "save.world_summary",
+            &error,
+            &[("world_name", &world_name)],
+        );
+        error
+    })
 }
 
 /// L1/L2：按真实世界目录路径解析玩家与公会摘要（本地单机 / 服务器通用）。
 #[tauri::command]
 pub async fn f5_world_summary_by_path(path: String) -> Result<WorldSummary, String> {
-    world_copy::f5_world_summary_by_path_impl(&path)
+    world_copy::f5_world_summary_by_path_impl(&path).map_err(|error| {
+        crate::app_log::record(
+            "ERROR",
+            "save.world_summary_by_path",
+            &error,
+            &[("path", &path)],
+        );
+        error
+    })
 }
 
 #[tauri::command]

@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/schema.json",
   "productName": "Palworld Server Manager",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "identifier": "com.palworld.server-manager",
   "build": {
     "beforeDevCommand": "npm run dev",

@@ -10,6 +10,14 @@ describe('first-time configuration flow', () => {
     expect(source).toContain("router.push('/overview')")
   })
 
+  it('等待服务器路径加载完成后再判断配置，路径变化时重新检查', async () => {
+    const source = await readFile(resolve(process.cwd(), 'src/views/OverviewView.vue'), 'utf8')
+
+    expect(source).toContain('isConfigInitialized === false')
+    expect(source).toContain('ref<boolean | null>(null)')
+    expect(source).toContain("watch(() => settingsStore.settings.server_path")
+  })
+
   it('新手联机只要求 REST 管理能力，不再要求即将弃用的 RCON', async () => {
     const source = await readFile(resolve(process.cwd(), 'src/stores/onboarding.ts'), 'utf8')
 

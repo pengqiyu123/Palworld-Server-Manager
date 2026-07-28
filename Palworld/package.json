@@ -1,7 +1,7 @@
 {
   "name": "palworld-server-manager",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.1",
   "license": "GPL-3.0-or-later",
   "type": "module",
   "scripts": {
@@ -11,6 +11,12 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
+    "tauri:build:portable": "node node_modules/vite/bin/vite.js build && node scripts/with-cargo-target.mjs tauri build --no-bundle --config scripts/tauri-portable.conf.json",
+    "package:portable": "node scripts/package-portable.mjs",
+    "cargo:check": "node scripts/with-cargo-target.mjs check",
+    "cargo:test": "node scripts/with-cargo-target.mjs test",
+    "cargo:fmt": "node scripts/with-cargo-target.mjs fmt",
+    "cargo:clippy": "node scripts/with-cargo-target.mjs clippy",
     "lint": "vue-tsc --noEmit",
     "test": "vitest run",
     "verify": "npm run lint && npm run build"

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::process::Command;
 use tauri::command;
+
+use crate::windows_process::hidden_command;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct FirewallStatus {
@@ -30,7 +31,7 @@ pub async fn check_firewall_rules() -> Result<FirewallStatus, String> {
 fn check_firewall_port(port: u16, protocol: &str) -> Result<bool, String> {
     // 对字符串参数应用 shell_escape 防止注入（防御性编程）
     let protocol_escaped = shell_escape::escape(protocol.into());
-    let output = Command::new("powershell")
+    let output = hidden_command("powershell")
         .args([
             "-Command",
             &format!(
@@ -55,7 +56,7 @@ pub async fn add_firewall_rules() -> Result<String, String> {
         // 对所有字符串参数应用 shell_escape 防止注入
         let name_escaped = shell_escape::escape(name.into());
         let protocol_escaped = shell_escape::escape(protocol.into());
-        let output = Command::new("powershell")
+        let output = hidden_command("powershell")
             .args([
                 "-Command",
                 &format!(

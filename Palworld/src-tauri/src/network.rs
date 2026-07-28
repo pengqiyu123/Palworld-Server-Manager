@@ -2,8 +2,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::from_str;
 use std::io::ErrorKind;
 use std::net::UdpSocket;
-use std::process::Command;
 use tauri::{command, State};
+
+use crate::windows_process::hidden_command;
 
 // ==================== Radmin 5 档分级检测（M1 · 收官） ====================
 //
@@ -128,7 +129,7 @@ fn next_action(action_type: &str, label: &str, payload: Option<&str>) -> NextAct
 // ==================== PowerShell 辅助 ====================
 
 fn run_powershell(script: &str) -> Result<String, String> {
-    let output = Command::new("powershell")
+    let output = hidden_command("powershell")
         .args(["-NoProfile", "-Command", script])
         .output()
         .map_err(|e| format!("执行 PowerShell 失败: {}", e))?;
@@ -260,7 +261,7 @@ pub struct RadminStatus {
 
 pub fn check_radmin_lan() -> Result<RadminStatus, String> {
     // 检测Radmin VPN适配器
-    let adapter_output = Command::new("powershell")
+    let adapter_output = hidden_command("powershell")
         .args([
             "-Command",
             "Get-NetAdapter | Where-Object { $_.InterfaceDescription -like '*Famatech Radmin VPN*' } | Select-Object -First 1 -ExpandProperty Status",
@@ -281,7 +282,7 @@ pub fn check_radmin_lan() -> Result<RadminStatus, String> {
     }
 
     // 获取虚拟IP（注意：此处沿用 R2 旧的 25.x 段兜底，仅用于兼容老前端；新前端请改用 check_radmin_readiness）
-    let ip_output = Command::new("powershell")
+    let ip_output = hidden_command("powershell")
         .args([
             "-Command",
             "Get-NetIPAddress -InterfaceAlias 'Radmin VPN' -AddressFamily IPv4 | Select-Object -ExpandProperty IPAddress",
@@ -301,7 +302,7 @@ pub fn check_radmin_lan() -> Result<RadminStatus, String> {
 }
 
 pub fn get_local_ip() -> Result<String, String> {
-    let output = Command::new("powershell")
+    let output = hidden_command("powershell")
         .args([
             "-Command",
             "Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' -and $_.InterfaceAlias -notlike '*Radmin*' -and $_.InterfaceAlias -notlike '*Loopback*' -and $_.InterfaceAlias -notlike '*WSL*' -and $_.InterfaceAlias -notlike '*Hyper*' } | Select-Object -First 1 -ExpandProperty IPAddress",
@@ -329,7 +330,7 @@ pub struct RadminLanStatus {
 #[command]
 pub async fn check_port_usage(port: u16) -> Result<Option<String>, String> {
     let port_str = shell_escape::escape(port.to_string().into());
-    let output = Command::new("powershell")
+    let output = hidden_command("powershell")
         .args([
             "-NoProfile",
             "-Command",

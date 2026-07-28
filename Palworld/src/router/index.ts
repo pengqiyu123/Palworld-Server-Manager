@@ -3,9 +3,9 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 /**
  * 路由表（视觉还原轮）：
  * - 四个主屏 S1~S4：/overview /config /network /rcon
- * - 三个占位屏（logs/backup/settings）复用 PlaceholderView
+ * - 旧设置和故障排查地址重定向至系统日志页
  * - / 重定向到 /overview
- * - /troubleshoot 路由保留，但不进入主导航（本轮不在重做范围）
+ * - /system-logs 提供可复制、可导出的应用运行记录
  */
 const routes: RouteRecordRaw[] = [
   {
@@ -66,24 +66,17 @@ const routes: RouteRecordRaw[] = [
   },
   {
     path: '/settings',
-    name: 'settings',
-    component: () => import('@/views/PlaceholderView.vue'),
-    meta: {
-      title: '设置',
-      phDesc: '应用设置为后续版本规划。当前服务器路径与本机管理接口已通过自动探测完成初始化。',
-      phIcon: 'ph-settings',
-    },
-    props: (route) => ({
-      title: route.meta.title as string,
-      desc: route.meta.phDesc as string,
-      iconName: route.meta.phIcon as string,
-    }),
+    redirect: '/system-logs',
   },
   {
     path: '/troubleshoot',
-    name: 'troubleshoot',
-    component: () => import('@/views/TroubleshootView.vue'),
-    meta: { title: '故障排查' },
+    redirect: '/system-logs',
+  },
+  {
+    path: '/system-logs',
+    name: 'system-logs',
+    component: () => import('@/views/SystemLogsView.vue'),
+    meta: { title: '系统日志' },
   },
 ]
 

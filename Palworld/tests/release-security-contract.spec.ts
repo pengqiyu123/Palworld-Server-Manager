@@ -89,7 +89,7 @@ describe('正式发布安全契约', () => {
 
   it('随第三方游戏数据保留完整的上游 MIT 授权条款', () => {
     const notice = read('src-tauri/resources/palworld-save-tools/NOTICE.md')
-    const thirdParty = read('../THIRD_PARTY_NOTICES.md')
+    const thirdParty = read('THIRD_PARTY_NOTICES.md')
 
     expect(notice).toContain('MIT License')
     expect(notice).toContain('Copyright (c) 2026 Pylar')

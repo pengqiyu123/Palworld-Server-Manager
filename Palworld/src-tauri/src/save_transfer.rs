@@ -665,60 +665,77 @@ pub async fn discover_local_worlds(extra_root: Option<String>) -> Result<Vec<Wor
 /// 即使 dest 已存在（如 F:\1）也不冲突。
 #[command]
 pub async fn backup_world(world_path: String, dest: Option<String>) -> Result<String, String> {
-    let world_dir = PathBuf::from(world_path.trim());
-    if !world_dir.is_dir() {
-        return Err(format!("世界目录不存在: {}", world_dir.display()));
-    }
-    // 世界名取末级目录名，并做白名单校验（防路径穿越）
-    let raw = world_dir
-        .file_name()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| "世界路径非法".to_string())?;
-    let world = safe_name_segment(&raw).ok_or_else(|| "世界名含非法字符".to_string())?;
-
-    let ts = format_timestamp(SystemTime::now());
-    // 确定目标目录：
-    //  - 自定义 dest = 「存放目录」，实际落 dest/<world>/<timestamp>/（即使 dest 已存在也不冲突）
-    //  - 默认 = 世界目录同级的 _backups/<world>/<timestamp>/
-    let backup_parent = match dest {
-        Some(d) if !d.trim().is_empty() => {
-            let p = PathBuf::from(d.trim());
-            if !p.is_absolute() {
-                return Err("自定义存放目录需为绝对路径（请用系统文件夹选择器）".to_string());
-            }
-            if p.components()
-                .any(|c| matches!(c, std::path::Component::ParentDir))
-            {
-                return Err("备份目标路径不得包含 '..'".to_string());
-            }
-            p.join(&world)
+    // 备份失败边界记录项目日志：备份是用户在迁移/改档前的保命操作，失败必须落盘
+    // （目录不存在、路径非法、磁盘满、复制中断等），便于用户反馈与追溯。
+    // 业务体包进 IIFE，在边界统一记录错误，不污染每个 ? 的错误信息。
+    let result = (|| -> Result<String, String> {
+        let world_dir = PathBuf::from(world_path.trim());
+        if !world_dir.is_dir() {
+            return Err(format!("世界目录不存在: {}", world_dir.display()));
         }
-        _ => {
-            let parent = world_dir
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| world_dir.clone());
-            parent.join("_backups").join(&world)
+        // 世界名取末级目录名，并做白名单校验（防路径穿越）
+        let raw = world_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| "世界路径非法".to_string())?;
+        let world = safe_name_segment(&raw).ok_or_else(|| "世界名含非法字符".to_string())?;
+
+        let ts = format_timestamp(SystemTime::now());
+        // 确定目标目录：
+        //  - 自定义 dest = 「存放目录」，实际落 dest/<world>/<timestamp>/（即使 dest 已存在也不冲突）
+        //  - 默认 = 世界目录同级的 _backups/<world>/<timestamp>/
+        // 注意：这里匹配 &dest（借用）而非 dest（移动），使 IIFE 闭包以引用方式捕获 dest，
+        // 边界日志才能在闭包外读取 dest 内容。
+        let backup_parent = match &dest {
+            Some(d) if !d.trim().is_empty() => {
+                let p = PathBuf::from(d.trim());
+                if !p.is_absolute() {
+                    return Err("自定义存放目录需为绝对路径（请用系统文件夹选择器）".to_string());
+                }
+                if p.components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+                {
+                    return Err("备份目标路径不得包含 '..'".to_string());
+                }
+                p.join(&world)
+            }
+            _ => {
+                let parent = world_dir
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| world_dir.clone());
+                parent.join("_backups").join(&world)
+            }
+        };
+
+        if let Some(existing) = find_matching_backup(&world_dir, &backup_parent) {
+            return Ok(format!("已存在相同世界备份：{}", existing.display()));
         }
-    };
+        let backup_dir = backup_parent.join(&ts);
 
-    if let Some(existing) = find_matching_backup(&world_dir, &backup_parent) {
-        return Ok(format!("已存在相同世界备份：{}", existing.display()));
+        if backup_dir.exists() {
+            return Err(format!("备份目标已存在: {}", backup_dir.display()));
+        }
+        copy_dir_recursive(&world_dir, &backup_dir)?;
+        let size = dir_size(&backup_dir);
+        Ok(format!(
+            "已备份世界「{}」到 {}（{:.2} MB）",
+            world,
+            backup_dir.display(),
+            size as f64 / (1024.0 * 1024.0)
+        ))
+    })();
+    if let Err(error) = &result {
+        let dest_str = dest.as_deref().unwrap_or("(default)");
+        crate::app_log::record(
+            "ERROR",
+            "save.backup_world",
+            error,
+            &[("world_path", &world_path), ("dest", dest_str)],
+        );
     }
-    let backup_dir = backup_parent.join(&ts);
-
-    if backup_dir.exists() {
-        return Err(format!("备份目标已存在: {}", backup_dir.display()));
-    }
-    copy_dir_recursive(&world_dir, &backup_dir)?;
-    let size = dir_size(&backup_dir);
-    Ok(format!(
-        "已备份世界「{}」到 {}（{:.2} MB）",
-        world,
-        backup_dir.display(),
-        size as f64 / (1024.0 * 1024.0)
-    ))
+    result
 }
 
 /// F4-P0：列出某世界的已有备份（restore 前供前端选择）。

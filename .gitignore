@@ -13,6 +13,9 @@ target/
 src-tauri/target/
 Palworld/src-tauri/target*/
 Palworld/output/
+Palworld/dist-portable/
+Palworld/backups/
+Palworld/data/
 Palworld/src-tauri/hints_raw.txt
 *.tsbuildinfo
 vite.config.ts.timestamp-*.mjs
